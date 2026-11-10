@@ -1,5 +1,5 @@
 // Détail d'une conversation : fil, analyse, ou discussion en direct.
-import { api, esc, ago, usd, icon, slotChip, toast, loader, imageStrip, diffStat, $, $$ } from "../lib.js";
+import { api, esc, ago, usd, turnEnd, icon, slotChip, toast, loader, imageStrip, diffStat, $, $$ } from "../lib.js";
 import { md } from "../md.js";
 import { renderAnalysis } from "./analysis.js";
 import { slide, moveTo } from "../slide.js";
@@ -13,6 +13,8 @@ import { openRun } from "../run.js";
 import { forkMessage } from "../btw.js";
 import { mountTabs } from "../tabs.js";
 import { userText } from "../elements.js";
+import { toBottom, jumpButton } from "../jump.js";
+import { confirmBox } from "../confirm.js";
 
 // L'URL porte la sélection : #/conversations?s=<conversation> | c=<discussion en direct> &t=<onglet>
 function nav(patch) {
@@ -63,7 +65,7 @@ async function renderChatDetail(chatId) {
         <button class="btn icon-only" id="chat-gh" title="GitHub : PR, CI, relectures">${icon("github")}</button>
         <button class="btn" id="chat-close" title="Arrêter et fermer la discussion">Fermer</button>
       </div>
-      <div class="meta">${slotChip(info.slot)}${info.worktree ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(info.worktree)}</span>` : ""}${info.bypass ? `<span class="chip waste">Bypass</span>` : `<span class="chip">Autorisations demandées</span>`}<span id="chat-cost"></span><span id="chat-bar"></span></div>
+      <div class="meta">${slotChip(info.slot)}${info.worktree ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(info.worktree)}</span>` : ""}${info.bypass ? `<span class="chip waste">Bypass</span>` : `<span class="chip">Autorisations demandées</span>`}<span id="chat-cost"></span><span id="chat-bar"></span><span class="rebase-chip-slot"></span></div>
       <div class="tabs" role="tablist"><button class="tab on" data-tab="conv" role="tab">Conversation</button><button class="tab" data-tab="analyse" role="tab" id="chat-analyse">Analyse</button></div>
     </div>
     ${info.setup_job ? `<div class="setup-strip" id="setup-strip"></div>` : ""}
@@ -83,12 +85,13 @@ async function renderChatDetail(chatId) {
   });
   const sendToChat = (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).catch((e) => toast(e.message, true));
   $("#chat-gh", box).addEventListener("click", () => openGithub({ chat: chatId }, info.name, { toClaude: sendToChat }));
+  rebaseChip(box, { chat: chatId }, "#chat-gh");
   $("#chat-review", box).addEventListener("click", () => openReview({ chat: chatId }, info.name));
   $("#chat-run", box).addEventListener("click", () => openRun({ chat: chatId }, info.repo_id, info.name, {
     onResult: (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).then(() => toast("Résultat envoyé à Claude.")).catch((e) => toast(e.message, true)),
   }));
   $("#chat-close", box).addEventListener("click", async () => {
-    if (!confirm("Arrêter et fermer cette discussion ? Elle restera lisible après une analyse.")) return;
+    if (!(await confirmBox("Arrêter et fermer cette discussion ?\n\nElle restera lisible après une analyse.", { ok: "Arrêter et fermer" }))) return;
     try { await api(`/api/chats/${chatId}`, { method: "DELETE" }); closeStream(); detailKey = ""; location.hash = "#/conversations"; } catch (e) { toast(e.message, true); }
   });
   const bar = { tokens: info.tokens_total, cost: info.cost_usd };
@@ -102,6 +105,18 @@ async function renderChatDetail(chatId) {
     if (m.cost != null) bar.cost = m.cost;
     if (m.tokens != null || m.cost != null) drawBar();
   });
+}
+
+// Retard de la branche sur sa base (calcul local) : pastille dans l'en-tête, qui ouvre le
+// panneau GitHub (bandeau « Rebase nécessaire » et bouton « Rebaser avec Claude »).
+async function rebaseChip(box, target, ghBtn) {
+  const b = await api(`/api/branch?${new URLSearchParams(target)}`).catch(() => null);
+  const slot = box.querySelector(".rebase-chip-slot");
+  if (!b || !slot || !b.behind) return;
+  const n = b.conflicts?.length || 0;
+  const title = `${b.behind} commit(s) de retard sur ${b.base_ref}${n ? " ; conflits prévus : " + b.conflicts.join(", ") : ""}`;
+  slot.innerHTML = `<button class="chip ${n ? "waste" : ""}" type="button" title="${esc(title)}">↓ ${b.behind} sur ${esc(b.base)}${n ? ` · ${n} conflit${n > 1 ? "s" : ""}` : ""}</button>`;
+  slot.firstChild.addEventListener("click", () => box.querySelector(ghBtn)?.click());
 }
 
 // Conversation passée : un prompt va en brouillon dans sa saisie (rien ne tourne pour le recevoir).
@@ -161,7 +176,7 @@ async function renderDetail(sid, tab) {
         <button class="btn icon-only" id="resume" title="Ouvrir dans Terminal">${icon("terminal")}</button>
         <button class="btn icon-only" id="conv-gh" title="GitHub : PR, CI, relectures">${icon("github")}</button>
       </div>
-      <div class="meta">${slotChip(conv.slot)}<span>${ago(conv.last_ts)}</span>${conv.branch ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(conv.branch)}</span>` : ""}${conv.cost_usd != null ? `<span>${usd(conv.cost_usd)}</span>` : ""}<span id="conv-bar"></span></div>
+      <div class="meta">${slotChip(conv.slot)}<span>${ago(conv.last_ts)}</span>${conv.branch ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(conv.branch)}</span>` : ""}${conv.cost_usd != null ? `<span>${usd(conv.cost_usd)}</span>` : ""}<span id="conv-bar"></span><span class="rebase-chip-slot"></span></div>
       <div class="tabs" role="tablist">
         <button class="tab${tab === "conv" ? " on" : ""}" data-tab="conv" role="tab">Conversation</button>
         <button class="tab${tab === "analyse" ? " on" : ""}" data-tab="analyse" role="tab">Analyse</button>
@@ -189,6 +204,7 @@ async function renderDetail(sid, tab) {
   $("[data-back]", box).addEventListener("click", () => document.body.classList.remove("sb-hidden"));
   $("#conv-review", box).addEventListener("click", () => openReview({ session: sid }, conv.title || ""));
   $("#conv-gh", box).addEventListener("click", () => openGithub({ session: sid }, conv.title || "", { toClaude: (text) => toDraft(sid, text) }));
+  rebaseChip(box, { session: sid }, "#conv-gh");
   $("#conv-run", box).addEventListener("click", () => openRun({ session: sid }, conv.repo_id, conv.title || "", {
     onResult: (text) => { toDraft(sid, text); toast("Résultat déposé dans la saisie."); },
   }));
@@ -214,7 +230,7 @@ async function renderBody(body, sid, tab) {
         const act = await api(`/api/sessions/${sid}/activity`).catch(() => ({}));
         if (act.last_write_ms_ago != null && act.last_write_ms_ago < 120000) {
           const secs = Math.round(act.last_write_ms_ago / 1000);
-          const ok = confirm(`Cette conversation a été écrite il y a ${secs} s : elle est sans doute ouverte ailleurs (terminal ou autre). La reprendre ici fera travailler deux agents dans la même conversation. Continuer quand même ?`);
+          const ok = await confirmBox(`Cette conversation a été écrite il y a ${secs} s : elle est sans doute ouverte ailleurs (terminal ou autre). La reprendre ici fera travailler deux agents dans la même conversation. Continuer quand même ?`);
           if (!ok) throw new Error("Reprise annulée.");
         }
         const chat = await api("/api/chats", { method: "POST", json: { session_id: sid, text, images, bypass: true, model: model || null } });
@@ -283,7 +299,8 @@ async function renderThread(body, sid) {
     $("#older", body)?.addEventListener("click", () => { shown = Math.min(blocks.length, shown + PAGE); draw(); body.scrollTop = 0; });
   };
   draw();
-  body.scrollTop = body.scrollHeight;
+  toBottom(body); // y compris au retour depuis « Analyse », et après l'ajout de la saisie
+  jumpButton(body, body.parentElement);
 }
 
 function block(b, sid) {
@@ -293,6 +310,7 @@ function block(b, sid) {
   }
   if (b.role === "assistant") return `<div class="msg-ai">${md(b.text)}</div>`;
   if (b.role === "event") return `<div class="event">${esc(b.text)}</div>`;
+  if (b.role === "turn") return `<div class="event turn-end" title="${esc(new Date(b.ts).toLocaleString("fr-FR"))}">Terminé ${esc(turnEnd(b.ts, b.duration_ms))}</div>`;
   const names = [...new Set(b.items.map((t) => t.tool))];
   const label = b.items.length === 1
     ? `${esc(b.items[0].tool)} <span style="opacity:.75">${esc(b.items[0].text)}</span>`

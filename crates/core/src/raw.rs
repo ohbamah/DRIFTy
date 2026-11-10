@@ -28,6 +28,8 @@ pub struct RawLine {
     #[serde(default)]
     pub is_api_error_message: bool,
     pub subtype: Option<String>,
+    /// Ligne `turn_duration` : durée du tour, écrite par Claude Code à sa fin.
+    pub duration_ms: Option<i64>,
     pub message: Option<Box<RawValue>>,
     pub ai_title: Option<String>,
     /// Titre donné à la main (renommage dans Claude Code) : prime sur `ai_title`.

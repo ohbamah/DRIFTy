@@ -50,6 +50,61 @@ pub fn record(slot: &str, statusline_input: &[u8]) -> Result<bool> {
     Ok(got)
 }
 
+/// Modèle du dernier relevé d'un compte (gardé quand le relevé vient de `/usage`).
+pub fn summary_model(slot: &str) -> Option<String> {
+    let snap: Value = serde_json::from_slice(&std::fs::read(dir().join(format!("{slot}.json"))).ok()?).ok()?;
+    snap["model"].as_str().map(str::to_string)
+}
+
+/// Relevé venant de `claude -p /usage` (commande locale de Claude Code, sans session ni coût) :
+/// « Current session: 26% used · resets Nov 10 at 6:19pm (Europe/Paris) » et « Current week
+/// (all models): 27% used · resets Nov 11 at 10:59am ». Rendu au format de la statusline, pour
+/// passer par le même point d'écriture (`record`). Heures lues dans le fuseau local.
+pub fn parse_usage_text(text: &str, now: chrono::DateTime<chrono::Local>) -> Option<Value> {
+    let window = |prefix: &str| -> Option<Value> {
+        let line = text.lines().find(|l| l.trim_start().starts_with(prefix))?;
+        let pct: f64 = line.split('%').next()?.rsplit(|c: char| !c.is_ascii_digit() && c != '.').next()?.parse().ok()?;
+        let resets = line.split("resets ").nth(1).and_then(|r| reset_at(r, now));
+        Some(json!({"used_percentage": pct, "resets_at": resets}))
+    };
+    let five = window("Current session")?;
+    let week = window("Current week (all models)").or_else(|| window("Current week"));
+    Some(json!({"rate_limits": {"five_hour": five, "seven_day": week}}))
+}
+
+/// « Nov 10 at 6:19pm (Europe/Paris) » ou « 6:19pm » → instant Unix (s), dans le fuseau local.
+fn reset_at(s: &str, now: chrono::DateTime<chrono::Local>) -> Option<i64> {
+    use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone};
+    let s = s.split(" (").next()?.trim();
+    let (date_part, time_part) = match s.split_once(" at ") {
+        Some((d, t)) => (Some(d.trim()), t.trim()),
+        None => (None, s),
+    };
+    let t = time_part.to_ascii_lowercase();
+    let (pm, hm) = if let Some(x) = t.strip_suffix("pm") { (true, x) } else if let Some(x) = t.strip_suffix("am") { (false, x) } else { return None };
+    let (h, m) = match hm.split_once(':') {
+        Some((h, m)) => (h.trim().parse::<u32>().ok()?, m.trim().parse::<u32>().ok()?),
+        None => (hm.trim().parse::<u32>().ok()?, 0),
+    };
+    let h = (h % 12) + if pm { 12 } else { 0 };
+    let time = NaiveTime::from_hms_opt(h, m, 0)?;
+    let date = match date_part {
+        Some(d) => {
+            let word = d.split_whitespace().next()?.to_ascii_lowercase();
+            let mon = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].iter().position(|x| word.starts_with(x))? as u32 + 1;
+            let day: u32 = d.split_whitespace().nth(1)?.trim_end_matches(',').parse().ok()?;
+            let mut date = NaiveDate::from_ymd_opt(now.year(), mon, day)?;
+            // Une date déjà passée de plus d'un jour : c'est l'année suivante (relevé de fin décembre).
+            if date < now.date_naive() - chrono::Days::new(1) {
+                date = NaiveDate::from_ymd_opt(now.year() + 1, mon, day)?;
+            }
+            date
+        }
+        None => now.date_naive(),
+    };
+    chrono::Local.from_local_datetime(&date.and_time(time)).earliest().map(|d| d.timestamp())
+}
+
 /// Relevé venant du flux d'un chat (`rate_limit_event.rate_limit_info.unifiedWindows`) :
 /// `utilization` de 0 à 1, `resetsAt` en secondes. Même fichier que le relais.
 pub fn record_unified(slot: &str, windows: &Value) -> Result<()> {
@@ -231,6 +286,22 @@ fn unquote(s: &str) -> String {
         s[1..s.len() - 1].replace(r"'\''", "'")
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod usage_text_tests {
+    #[test]
+    fn usage_command_text_is_parsed() {
+        use chrono::TimeZone;
+        let now = chrono::Local.with_ymd_and_hms(2026, 11, 10, 16, 0, 0).unwrap();
+        let txt = "You are currently using your subscription\n\nCurrent session: 26% used · resets Nov 10 at 6:19pm (Europe/Paris)\nCurrent week (all models): 27% used · resets Nov 11 at 10:59am (Europe/Paris)\nCurrent week (Fable): 0% used · resets Nov 11 at 11am";
+        let v = super::parse_usage_text(txt, now).unwrap();
+        assert_eq!(v["rate_limits"]["five_hour"]["used_percentage"], 26.0);
+        assert_eq!(v["rate_limits"]["seven_day"]["used_percentage"], 27.0);
+        let five = v["rate_limits"]["five_hour"]["resets_at"].as_i64().unwrap();
+        assert_eq!(five, chrono::Local.with_ymd_and_hms(2026, 11, 10, 18, 19, 0).unwrap().timestamp());
+        assert!(super::parse_usage_text("no limits here", now).is_none());
     }
 }
 

@@ -1,7 +1,7 @@
 // Actions sur une réponse de l'agent (tout ce qu'il produit entre deux messages
 // de l'utilisateur) : copier son texte, ou le transférer vers une autre
 // conversation du même projet (worktree, puis conversation).
-import { api, esc, icon, toast, $, $$ } from "./lib.js";
+import { api, esc, icon, toast, $, $$, copyText } from "./lib.js";
 import { store, convsFor, ensureLoaded } from "./store.js";
 
 /** Boutons translucides affichés au survol d'une réponse. */
@@ -25,7 +25,7 @@ export function bindReplies(container, rawOf, ctx) {
     const raw = (rawOf(reply) || "").trim();
     if (!raw) return toast("Cette réponse ne contient pas de texte.", true);
     if (btn.hasAttribute("data-copy")) {
-      try { await navigator.clipboard.writeText(raw); toast("Réponse copiée."); } catch { toast("Copie impossible.", true); }
+      (await copyText(raw)) ? toast("Réponse copiée.") : toast("Copie impossible.", true);
     } else {
       if (document.querySelector("dialog.tf-dlg")) return; // déjà ouverte
       transferDialog(raw, await ctx());

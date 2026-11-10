@@ -50,6 +50,9 @@ struct State {
     status: &'static str,
     pending: HashMap<String, Value>,
     cost_usd: f64,
+    /// Dernier `total_cost_usd` reçu : Claude Code le donne CUMULÉ depuis le lancement du
+    /// processus (mesuré : 0,0018 puis 0,0027) ; chaque tour ne compte que la différence.
+    reported_cost: f64,
     /// Tokens de la conversation : déjà consommés + ceux des tours vécus ici.
     tokens: i64,
     /// Modèle en service (annoncé par Claude Code à l'ouverture, puis à chaque changement).
@@ -109,8 +112,40 @@ pub struct Chat {
     tx: broadcast::Sender<Value>,
     /// Signal du hub : ce chat a changé (statut, coût, file, nom…).
     changed: broadcast::Sender<()>,
+    /// Limites de la jauge (partagées, relues à chaque fin de tour).
+    limits: Arc<Mutex<Limits>>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     child: tokio::sync::Mutex<Option<Child>>,
+}
+
+/// Limites de la jauge de conversation, appliquées à CHAQUE discussion : `/compact` quand
+/// ses tokens franchissent le plafond, arrêt quand son coût atteint 99 % du budget.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    /// `true` : jauge en tokens (auto-compact) ; `false` : jauge en budget (arrêt). Exclusifs.
+    pub tokens_mode: bool,
+    pub tokens_cap: f64,
+    pub budget_usd: f64,
+    pub auto_compact: bool,
+    pub stop_at_budget: bool,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { tokens_mode: true, tokens_cap: 1e9, budget_usd: 50.0, auto_compact: true, stop_at_budget: true }
+    }
+}
+
+impl Limits {
+    /// Budget atteint (99 %) avec l'arrêt demandé : plus rien ne part.
+    fn over_budget(&self, cost: f64) -> bool {
+        !self.tokens_mode && self.stop_at_budget && self.budget_usd > 0.0 && cost >= self.budget_usd * 0.99
+    }
+
+    /// Jauge des tokens franchie (100 %, 200 %…) en mode tokens avec l'auto-compact.
+    fn compact_due(&self, before: i64, total: i64) -> bool {
+        self.tokens_mode && self.auto_compact && self.tokens_cap > 0.0 && (total as f64 / self.tokens_cap).floor() > (before as f64 / self.tokens_cap).floor()
+    }
 }
 
 #[derive(Clone)]
@@ -118,12 +153,18 @@ pub struct Hub {
     chats: Arc<Mutex<HashMap<String, Arc<Chat>>>>,
     /// « La liste a changé » : poussé aux pages (flux `/api/events`) au lieu d'être relu.
     changed: broadcast::Sender<()>,
+    limits: Arc<Mutex<Limits>>,
 }
 
 impl Default for Hub {
     fn default() -> Self {
-        Hub { chats: Arc::default(), changed: broadcast::channel(64).0 }
+        Hub { chats: Arc::default(), changed: broadcast::channel(64).0, limits: Arc::default() }
     }
+}
+
+/// Montant en dollars à la française : « 12,40 $ » (« < 0,01 $ » pour les poussières).
+fn fr_usd(x: f64) -> String {
+    if x > 0.0 && x < 0.005 { "< 0,01 $".into() } else { format!("{x:.2} $").replace('.', ",") }
 }
 
 fn now_ms() -> i64 {
@@ -197,6 +238,13 @@ impl Chat {
     pub async fn send(&self, text: &str, images: Vec<Image>) -> Result<()> {
         if text.trim().is_empty() && images.is_empty() {
             anyhow::bail!("The message cannot be sent because it is empty.");
+        }
+        let (cost, limits) = (self.state.lock().unwrap().cost_usd, *self.limits.lock().unwrap());
+        if limits.over_budget(cost) {
+            anyhow::bail!(
+                "The message cannot be sent because this conversation has spent ${cost:.2} of its ${:.2} budget (stop at 99 %).",
+                limits.budget_usd
+            );
         }
         check_images(&images)?;
         let queued = {
@@ -283,6 +331,10 @@ impl Chat {
 
     /// Claude a fini son tour : on lui transmet le message suivant de la file, s'il y en a un.
     async fn next_in_queue(&self) {
+        let (cost, limits) = (self.state.lock().unwrap().cost_usd, *self.limits.lock().unwrap());
+        if limits.over_budget(cost) {
+            return; // budget atteint : la file attend (levée en relevant le budget ou en décochant l'arrêt)
+        }
         let next = {
             let mut st = self.state.lock().unwrap();
             if st.queue.is_empty() { None } else { Some(st.queue.remove(0)) }
@@ -388,6 +440,10 @@ impl Hub {
         Ok(())
     }
 
+    pub fn set_limits(&self, l: Limits) {
+        *self.limits.lock().unwrap() = l;
+    }
+
     pub fn watch(&self) -> broadcast::Receiver<()> {
         self.changed.subscribe()
     }
@@ -443,6 +499,7 @@ impl Hub {
                 status: "idle",
                 pending: HashMap::new(),
                 cost_usd: spec.cost_base,
+                reported_cost: 0.0,
                 tokens: spec.tokens_base,
                 model: spec.model.clone(),
                 queue: Vec::new(),
@@ -452,6 +509,7 @@ impl Hub {
             }),
             tx,
             changed: self.changed.clone(),
+            limits: self.limits.clone(),
             stdin: tokio::sync::Mutex::new(stdin),
             child: tokio::sync::Mutex::new(Some(child)),
         });
@@ -504,17 +562,31 @@ impl Hub {
                             }
                         }
                         Some("result") => {
-                            let cost = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
+                            let reported = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
                             let u = &ev["usage"];
                             let n = |k: &str| u[k].as_i64().unwrap_or(0);
                             let turn = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens") + n("output_tokens");
-                            let (total, cost_total) = {
+                            let (before, total, cost_total) = {
                                 let mut st = chat.state.lock().unwrap();
+                                let before = st.tokens;
+                                // Cumul du processus : la différence avec le précédent (un cumul qui
+                                // redescend signale un nouveau décompte : il compte en entier).
+                                let cost = if reported >= st.reported_cost { reported - st.reported_cost } else { reported };
+                                st.reported_cost = reported;
                                 st.cost_usd += cost;
                                 st.tokens += turn;
-                                (st.tokens, st.cost_usd)
+                                (before, st.tokens, st.cost_usd)
                             };
                             chat.emit(json!({"type": "drifty", "kind": "tokens", "total": total, "cost": cost_total}));
+                            let limits = *chat.limits.lock().unwrap();
+                            // Jauge des tokens franchie (100 %, 200 %…) : `/compact` passe avant la file.
+                            if limits.compact_due(before, total) {
+                                chat.state.lock().unwrap().queue.insert(0, (new_id(), "/compact".to_string(), vec![]));
+                                chat.emit(json!({"type": "drifty", "kind": "notice", "text": "Jauge des tokens à 100 % : compaction automatique (/compact)."}));
+                            }
+                            if limits.over_budget(cost_total) {
+                                chat.emit(json!({"type": "drifty", "kind": "notice", "text": format!("Budget atteint ({} sur {}) : la discussion s'arrête. Relève le budget ou décoche l'arrêt à 99 % pour continuer.", fr_usd(cost_total), fr_usd(limits.budget_usd))}));
+                            }
                         }
                         _ => {}
                     }
@@ -703,6 +775,16 @@ mod tests {
         w.observe(&call("b"));
         let big = w.observe(&json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b", "content": "x".repeat(50_000)}]}}));
         assert_eq!(big[0]["what"], "big");
+    }
+
+    #[test]
+    fn limits_follow_the_chosen_mode() {
+        let tokens = super::Limits { tokens_mode: true, tokens_cap: 1000.0, budget_usd: 1.0, auto_compact: true, stop_at_budget: true };
+        assert!(!tokens.over_budget(5.0), "en mode tokens, le budget n'arrête rien");
+        assert!(tokens.compact_due(900, 1100) && !tokens.compact_due(1100, 1900) && tokens.compact_due(1900, 2100));
+        let budget = super::Limits { tokens_mode: false, ..tokens };
+        assert!(budget.over_budget(0.99) && !budget.over_budget(0.5));
+        assert!(!budget.compact_due(900, 1100), "en mode budget, pas d'auto-compact");
     }
 
     #[test]

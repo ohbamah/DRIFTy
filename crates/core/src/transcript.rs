@@ -9,9 +9,9 @@ use std::io::{BufRead, BufReader};
 
 const MAX_TEXT: usize = 6_000;
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct Entry {
-    /// user | assistant | tool | event
+    /// user | assistant | tool | event | turn (fin d'un tour : `ts` = heure de fin)
     pub role: &'static str,
     pub ts: Option<i64>,
     pub text: String,
@@ -25,6 +25,9 @@ pub struct Entry {
     /// Modification de fichier : [lignes ajoutées, lignes retirées].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<[i64; 2]>,
+    /// Fin d'un tour : sa durée totale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
 }
 
 fn clip(s: &str) -> String {
@@ -58,9 +61,14 @@ pub fn read(conn: &Connection, sid: &str) -> Result<Vec<Entry>> {
             continue;
         }
         let ts = r.timestamp.as_deref().and_then(raw::parse_ts);
+        // Fin d'un tour (écrite par Claude Code) : heure de fin et durée totale.
+        if r.subtype.as_deref() == Some("turn_duration") {
+            out.push(Entry { role: "turn", ts, duration_ms: r.duration_ms, ..Default::default() });
+            continue;
+        }
         if r.is_compact_summary || r.subtype.as_deref() == Some("compact_boundary") {
             if r.subtype.is_some() {
-                out.push(Entry { role: "event", ts, text: "Contexte compacté".into(), tool: None, tool_id: None, images: vec![], diff: None });
+                out.push(Entry { role: "event", ts, text: "Contexte compacté".into(), tool: None, tool_id: None, images: vec![], diff: None, ..Default::default() });
             }
             continue;
         }
@@ -85,7 +93,7 @@ pub fn read(conn: &Connection, sid: &str) -> Result<Vec<Entry>> {
                 if !images.is_empty() {
                     match out[before..].iter_mut().rev().find(|e| e.role == "user") {
                         Some(e) => e.images = images,
-                        None => out.push(Entry { role: "user", ts, text: String::new(), tool: None, tool_id: None, images, diff: None }),
+                        None => out.push(Entry { role: "user", ts, text: String::new(), tool: None, tool_id: None, images, diff: None, ..Default::default() }),
                     }
                 }
             }
@@ -94,10 +102,11 @@ pub fn read(conn: &Connection, sid: &str) -> Result<Vec<Entry>> {
                     match b.kind.as_str() {
                         "text" => {
                             if let Some(t) = b.text.filter(|t| !t.trim().is_empty()) {
-                                out.push(Entry { role: "assistant", ts, text: clip(&t), tool: None, tool_id: None, images: vec![], diff: None });
+                                out.push(Entry { role: "assistant", ts, text: clip(&t), tool: None, tool_id: None, images: vec![], diff: None, ..Default::default() });
                             }
                         }
                         "tool_use" => out.push(Entry {
+                            duration_ms: None,
                             role: "tool",
                             ts,
                             diff: b
@@ -124,12 +133,12 @@ pub fn read(conn: &Connection, sid: &str) -> Result<Vec<Entry>> {
 fn push_user(out: &mut Vec<Entry>, ts: Option<i64>, t: &str) {
     let s = t.trim();
     if s.starts_with("[Request interrupted") {
-        out.push(Entry { role: "event", ts, text: "Interrompu par l'utilisateur".into(), tool: None, tool_id: None, images: vec![], diff: None });
+        out.push(Entry { role: "event", ts, text: "Interrompu par l'utilisateur".into(), tool: None, tool_id: None, images: vec![], diff: None, ..Default::default() });
     } else if let Some(cmd) = s.strip_prefix("<command-name>") {
         let name = cmd.split("</command-name>").next().unwrap_or("");
-        out.push(Entry { role: "event", ts, text: format!("Commande {name}"), tool: None, tool_id: None, images: vec![], diff: None });
+        out.push(Entry { role: "event", ts, text: format!("Commande {name}"), tool: None, tool_id: None, images: vec![], diff: None, ..Default::default() });
     } else if !s.is_empty() && !s.starts_with('<') {
-        out.push(Entry { role: "user", ts, text: clip(s), tool: None, tool_id: None, images: vec![], diff: None });
+        out.push(Entry { role: "user", ts, text: clip(s), tool: None, tool_id: None, images: vec![], diff: None, ..Default::default() });
     }
 }
 

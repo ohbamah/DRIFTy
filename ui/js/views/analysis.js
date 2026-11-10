@@ -1,5 +1,5 @@
 // Onglet « Analyse » d'une conversation : temps, causes, gains estimés.
-import { api, esc, tok, dur, pct, num, usd, date, showTip, hideTip, loader, toast } from "../lib.js";
+import { api, esc, tok, dur, pct, num, usd, date, showTip, hideTip, loader, toast, copyText } from "../lib.js";
 import { md } from "../md.js";
 
 const VERDICT = { oui: "Optimisable", partiel: "En partie", non: "Non optimisable" };
@@ -158,7 +158,7 @@ export async function renderAnalysis(root, sid) {
     });
     box.querySelector("[data-copy]")?.addEventListener("click", async () => {
       const text = [...box.querySelectorAll(".rule:not(.done)[data-raw]")].map((r) => "- " + r.dataset.raw).join("\n");
-      try { await navigator.clipboard.writeText(text); toast("Copié."); } catch { toast("Copie impossible.", true); }
+      (await copyText(text)) ? toast("Copié.") : toast("Copie impossible.", true);
     });
   }));
   root.querySelectorAll("[data-items]").forEach((b) => b.addEventListener("click", () => open(b, items(d.causes[+b.dataset.items].items), "items")));

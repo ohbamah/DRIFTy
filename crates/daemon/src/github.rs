@@ -89,7 +89,7 @@ const THREAD_QUERY: &str = "query($owner:String!,$repo:String!,$n:Int!){
     latestReviews(first:30){ nodes { author { login avatarUrl(size:64) } state } }
     comments(first:100){ nodes { author { login avatarUrl(size:64) } body bodyHTML createdAt url isMinimized minimizedReason } }
     reviews(first:100){ nodes { author { login avatarUrl(size:64) } body bodyHTML state submittedAt url } }
-    reviewThreads(first:100){ nodes { isResolved isOutdated path line originalLine resolvedBy { login }
+    reviewThreads(first:100){ nodes { id viewerCanResolve viewerCanUnresolve isResolved isOutdated path line originalLine resolvedBy { login }
       comments(first:50){ nodes { author { login avatarUrl(size:64) } body bodyHTML createdAt url diffHunk } } } }
   } } }";
 
@@ -127,6 +127,7 @@ fn timeline(dir: &str, n: i64) -> Result<Value> {
         let first = nodes(&t["comments"]).next();
         items.push(json!({"kind": "thread", "path": t["path"], "line": if t["line"].is_null() { t["originalLine"].clone() } else { t["line"].clone() },
                           "resolved": t["isResolved"], "outdated": t["isOutdated"], "resolved_by": t["resolvedBy"]["login"],
+                          "id": t["id"], "can_resolve": t["viewerCanResolve"], "can_unresolve": t["viewerCanUnresolve"],
                           "hunk": first.map_or(Value::Null, |c| c["diffHunk"].clone()), "at": first.map_or(Value::Null, |c| c["createdAt"].clone()),
                           "comments": comments}));
     }
@@ -189,6 +190,39 @@ fn gate(p: &Value, checks: &[Value]) -> Value {
     json!({"level": level, "reasons": reasons})
 }
 
+/// Pile de PR empilées autour de la branche : les PR dont elle part (vers la base), puis
+/// celles qui partent d'elle. Du bas (la plus proche de la base) vers le haut ; vide si seule.
+fn stack(dir: &str, br: &str) -> Value {
+    let Some(raw) = ok(dir, "gh", &["pr", "list", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,isDraft,url"]) else {
+        return json!([]);
+    };
+    let Ok(Value::Array(prs)) = serde_json::from_str::<Value>(&raw) else { return json!([]) };
+    let head = |b: &str| prs.iter().find(|p| p["headRefName"] == b);
+    let Some(me) = head(br) else { return json!([]) };
+    let mut chain = vec![me.clone()];
+    // Vers le bas : la PR dont la tête est ma base, etc.
+    let mut base = me["baseRefName"].as_str().unwrap_or("").to_string();
+    while let Some(p) = head(&base).filter(|p| !chain.iter().any(|c| c["number"] == p["number"])) {
+        chain.insert(0, p.clone());
+        base = p["baseRefName"].as_str().unwrap_or("").to_string();
+    }
+    // Vers le haut : une PR qui part de ma tête (la première s'il y en a plusieurs).
+    let mut top = br.to_string();
+    while let Some(p) = prs.iter().find(|p| p["baseRefName"] == top.as_str() && !chain.iter().any(|c| c["number"] == p["number"])) {
+        chain.push(p.clone());
+        top = p["headRefName"].as_str().unwrap_or("").to_string();
+    }
+    if chain.len() < 2 {
+        return json!([]);
+    }
+    Value::Array(
+        chain
+            .iter()
+            .map(|p| json!({"number": p["number"], "title": p["title"], "head": p["headRefName"], "base": p["baseRefName"], "draft": p["isDraft"], "url": p["url"], "current": p["headRefName"] == br}))
+            .collect(),
+    )
+}
+
 /// PR ouverte (ou la plus récente) de la branche ; `None` s'il n'y en a pas.
 fn pr_view(dir: &str, branch: &str) -> Result<Option<Value>> {
     match run(dir, "gh", &["pr", "view", branch, "--json", PR_FIELDS]) {
@@ -212,11 +246,14 @@ pub fn state(dir: &str) -> Result<Value> {
     let br = branch(dir);
     let base = review::base_branch(dir);
     let dirty = run(dir, "git", &["status", "--porcelain"])?.lines().filter(|l| !l.is_empty()).count();
+    // Base à jour (panneau ouvert à la demande : un `fetch` de la seule branche de base).
+    if br != base {
+        let _ = run(dir, "git", &["fetch", "--quiet", "origin", &base]);
+    }
     let upstream = ok(dir, "git", &["rev-parse", "--abbrev-ref", "@{u}"]);
     let (unpulled, unpushed) = upstream.as_deref().and_then(|u| counts(dir, u)).unwrap_or((0, 0));
-    let remote_base = format!("origin/{base}");
-    let base_ref = if ok(dir, "git", &["rev-parse", "--verify", "--quiet", &remote_base]).is_some() { remote_base } else { base.clone() };
-    let (behind, ahead) = counts(dir, &base_ref).unwrap_or((0, 0));
+    let local = branch_status(dir);
+    let (base_ref, behind, ahead, conflicts) = (local["base_ref"].as_str().unwrap_or(&base).to_string(), local["behind"].as_i64().unwrap_or(0), local["ahead"].as_i64().unwrap_or(0), local["conflicts"].clone());
     let has_gh = ok(dir, "gh", &["--version"]).is_some();
     let (pr, gh_error) = if !has_gh || br == base || br == "HEAD" {
         (Value::Null, Value::Null)
@@ -230,7 +267,7 @@ pub fn state(dir: &str) -> Result<Value> {
                     json!({"number": n, "title": p["title"], "url": p["url"], "state": lower(&p["state"]), "draft": p["isDraft"],
                            "review_decision": lower(&p["reviewDecision"]), "mergeable": lower(&p["mergeable"]), "merge_state": lower(&p["mergeStateStatus"]),
                            "base": p["baseRefName"], "head": t["head"], "commits": t["commits"], "author": t["author"], "viewer": t["viewer"],
-                           "reviewers": t["reviewers"], "gate": gate(&p, &checks), "can_admin": t["can_admin"], "checks": checks, "thread": t["items"]}),
+                           "reviewers": t["reviewers"], "stack": stack(dir, &br), "gate": gate(&p, &checks), "can_admin": t["can_admin"], "checks": checks, "thread": t["items"]}),
                     Value::Null,
                 )
             }
@@ -240,7 +277,7 @@ pub fn state(dir: &str) -> Result<Value> {
     };
     Ok(json!({
         "branch": br, "base": base, "base_ref": base_ref, "dirty": dirty, "upstream": upstream, "unpushed": unpushed, "unpulled": unpulled,
-        "ahead": ahead, "behind": behind, "has_gh": has_gh, "pr": pr, "gh_error": gh_error,
+        "ahead": ahead, "behind": behind, "conflicts": conflicts, "has_gh": has_gh, "pr": pr, "gh_error": gh_error,
     }))
 }
 
@@ -293,6 +330,10 @@ pub struct ActionReq {
     #[serde(default)]
     admin: bool,
     run_id: Option<u64>,
+    /// Fil de revue à résoudre / rouvrir (identifiant GraphQL).
+    thread_id: Option<String>,
+    /// PR de la pile vers laquelle basculer.
+    number: Option<i64>,
 }
 
 pub fn act(dir: &str, a: &ActionReq) -> Result<Value> {
@@ -367,6 +408,25 @@ pub fn act(dir: &str, a: &ActionReq) -> Result<Value> {
             run(dir, "gh", &["pr", "ready", &n.to_string()])?;
             Ok(json!({"ok": true}))
         }
+        "resolve" | "unresolve" => {
+            let id = a.thread_id.as_deref().unwrap_or("");
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '=')) {
+                bail!("The review thread cannot be changed because `{id}` is not a thread id.");
+            }
+            let m = if a.action == "resolve" { "resolveReviewThread" } else { "unresolveReviewThread" };
+            let q = format!("mutation($id:ID!){{ {m}(input:{{threadId:$id}}) {{ thread {{ isResolved }} }} }}");
+            run(dir, "gh", &["api", "graphql", "-F", &format!("id={id}"), "-f", &format!("query={q}")])?;
+            Ok(json!({"ok": true}))
+        }
+        "checkout" => {
+            let n = a.number.filter(|n| *n > 0).ok_or_else(|| anyhow::anyhow!("The pull request cannot be checked out because no number is given."))?;
+            let dirty = run(dir, "git", &["status", "--porcelain", "--untracked-files=no"])?.lines().filter(|l| !l.is_empty()).count();
+            if dirty > 0 {
+                bail!("The pull request #{n} cannot be checked out because {dirty} tracked file{} would be overwritten (uncommitted changes).", if dirty > 1 { "s" } else { "" });
+            }
+            run(dir, "gh", &["pr", "checkout", &n.to_string()])?;
+            Ok(json!({"branch": branch(dir)}))
+        }
         "rerun" => {
             let id = a.run_id.ok_or_else(|| anyhow::anyhow!("The CI cannot be rerun because no run is named."))?;
             run(dir, "gh", &["run", "rerun", &id.to_string(), "--failed"])?;
@@ -393,6 +453,32 @@ pub struct LogQ {
     #[serde(flatten)]
     target: ReviewTarget,
     run: u64,
+}
+
+/// État LOCAL de la branche face à sa base (aucun accès réseau) : retard, avance, et
+/// fichiers qui entreraient en conflit à un rebase (`git merge-tree`, rien n'est modifié).
+pub fn branch_status(dir: &str) -> Value {
+    let br = branch(dir);
+    let base = review::base_branch(dir);
+    let remote_base = format!("origin/{base}");
+    let base_ref = if ok(dir, "git", &["rev-parse", "--verify", "--quiet", &remote_base]).is_some() { remote_base } else { base.clone() };
+    let (behind, ahead) = if br == base || br == "HEAD" { (0, 0) } else { counts(dir, &base_ref).unwrap_or((0, 0)) };
+    let mut conflicts: Vec<String> = Vec::new();
+    if behind > 0 && ahead > 0 {
+        if let Ok(o) = Command::new("git").current_dir(dir).args(["merge-tree", "--write-tree", "--name-only", "--no-messages", &base_ref, "HEAD"]).output() {
+            // Code 1 = conflits : la 1re ligne est l'arbre, les suivantes les fichiers en conflit.
+            if o.status.code() == Some(1) {
+                conflicts = String::from_utf8_lossy(&o.stdout).lines().skip(1).filter(|l| !l.is_empty()).map(str::to_string).collect();
+                conflicts.dedup();
+            }
+        }
+    }
+    json!({"branch": br, "base": base, "base_ref": base_ref, "behind": behind, "ahead": ahead, "conflicts": conflicts})
+}
+
+pub async fn get_branch(State(app): State<App>, Query(t): Query<ReviewTarget>) -> ApiResult {
+    let (dir, _) = review_dir(&app, &t).await?;
+    Ok(Json(tokio::task::spawn_blocking(move || branch_status(&dir)).await?))
 }
 
 pub async fn get_log(State(app): State<App>, Query(q): Query<LogQ>) -> ApiResult {

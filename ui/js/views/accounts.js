@@ -2,6 +2,7 @@
 import { api, esc, icon, toast, getTheme, setTheme, $$ } from "../lib.js";
 import { moveTo } from "../slide.js";
 import { EVENTS, soundList, loadNotifyCfg, play, askPermission } from "../notify.js";
+import { confirmBox, promptBox } from "../confirm.js";
 
 export async function show(root) {
   const accs = await api("/api/accounts");
@@ -50,7 +51,7 @@ export async function show(root) {
     } catch (err) { toast(err.message, true); }
   }));
   $$("[data-remove]", root).forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm(`Retirer le compte ${b.dataset.remove} ?`)) return;
+    if (!(await confirmBox(`Retirer le compte ${b.dataset.remove} ?`, { ok: "Retirer", danger: true }))) return;
     try {
       await api(`/api/accounts/${b.dataset.remove}`, { method: "DELETE" });
       toast("Compte retiré.");
@@ -97,13 +98,13 @@ async function drawNotify(box) {
   box.querySelector("#nt-perm")?.addEventListener("click", async () => { await askPermission(); drawNotify(box); });
   box.querySelectorAll("[data-play-custom]").forEach((b) => b.addEventListener("click", () => play("u:" + b.dataset.playCustom, +box.querySelector("#nt-vol").value)));
   box.querySelectorAll("[data-del-sound]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Supprimer ce son ? Les événements qui l'utilisent reprendront le son par défaut.")) return;
+    if (!(await confirmBox("Supprimer ce son ?\n\nLes événements qui l'utilisent reprendront le son par défaut.", { ok: "Supprimer", danger: true }))) return;
     try { await api(`/api/sounds/${b.dataset.delSound}`, { method: "DELETE" }); drawNotify(box); } catch (e) { toast(e.message, true); }
   }));
   box.querySelector("#nt-add").addEventListener("change", async (e) => {
     const f = e.target.files[0];
     if (!f) return;
-    const name = prompt("Nom du son", f.name.replace(/\.[^.]+$/, "").slice(0, 40));
+    const name = await promptBox("Nom du son", f.name.replace(/\.[^.]+$/, "").slice(0, 40), { ok: "Ajouter" });
     if (!name?.trim()) return;
     try {
       const r = await fetch(`/api/sounds?name=${encodeURIComponent(name.trim())}`, { method: "POST", headers: { "Content-Type": f.type || "audio/mpeg" }, body: f });

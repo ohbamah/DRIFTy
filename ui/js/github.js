@@ -2,8 +2,9 @@
 // en-tête, relecteurs, fil (HTML rendu par GitHub, fils résolus repliés), boîte de
 // fusion (relectures, checks, conflits, bouton de fusion), commentaire. Les actions
 // simples lancent git / gh ; les complexes deviennent un prompt confié à Claude.
-import { api, esc, icon, toast, loader, ago, $, $$ } from "./lib.js";
+import { api, esc, icon, toast, loader, ago, $, $$, copyText } from "./lib.js";
 import { openMenu } from "./select.js";
+import { confirmBox } from "./confirm.js";
 
 // ------------------------------------------------------------ icônes (traits, 24 × 24)
 const P = {
@@ -83,6 +84,20 @@ const failed = (c) => c.status === "done" && !["success", "skipped", "neutral", 
 const ciIcon = (c) => (c.status === "pending" ? `<span class="ghp-ci pending"></span>`
   : c.conclusion === "success" ? ic("check", "ok") : ["skipped", "neutral", "cancelled"].includes(c.conclusion) ? `<span class="ghp-ci skip">–</span>` : ic("x", "ko"));
 
+// Nom de branche copiable (comme sur GitHub).
+const refCopy = (name) => `<code class="ghp-ref">${esc(name)}</code><button class="ghp-copy" type="button" data-copy-ref="${esc(name)}" title="Copier le nom de la branche" aria-label="Copier le nom de la branche">${icon("copy")}</button>`;
+
+/** Prompt de rebase confié à Claude (bandeau et boîte de fusion) : un seul texte. */
+export function rebasePrompt(s) {
+  const conf = s.conflicts || [];
+  const q = (x) => "`" + x + "`";
+  return [
+    `Rebase la branche ${q(s.branch)} sur ${q(s.base_ref)} : ${q("git fetch origin " + s.base)}, puis ${q("git rebase " + s.base_ref)}.` + (conf.length ? ` Des conflits sont prévus dans : ${conf.map(q).join(", ")}.` : ""),
+    `Résous chaque conflit en gardant l'intention des deux côtés, puis ${q("git rebase --continue")} ; jamais ${q("--skip")} sans me demander.` + ` Ensuite, vérifie que ça compile et que les tests touchés passent, et pousse avec ${q("git push --force-with-lease")} (jamais ${q("--force")}).`,
+    `Si le rebase devient trop risqué, arrête-toi (${q("git rebase --abort")}) et explique-moi pourquoi.`,
+  ].join("\n");
+}
+
 /** target : `{chat}` ou `{session}` ; toClaude(text) : confie un prompt à la conversation. */
 export async function openGithub(target, title, { toClaude } = {}) {
   document.querySelector(".review")?.remove();
@@ -98,6 +113,15 @@ export async function openGithub(target, title, { toClaude } = {}) {
   const opened = new Set(); // repliables ouverts, gardés d'une actualisation à l'autre
   $("[data-close]", panel).addEventListener("click", () => { clearTimeout(timer); panel.remove(); });
   $("[data-refresh]", panel).addEventListener("click", () => draw());
+  panel.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-copy-ref]");
+    if (!b) return;
+    if (await copyText(b.dataset.copyRef)) {
+      b.classList.add("done");
+      b.innerHTML = icon("check");
+      setTimeout(() => { b.classList.remove("done"); b.innerHTML = icon("copy"); }, 1400);
+    } else toast("Copie impossible.", true);
+  });
 
   const act = async (btn, json, okMsg) => {
     if (btn) btn.disabled = true;
@@ -115,6 +139,19 @@ export async function openGithub(target, title, { toClaude } = {}) {
   };
 
   // ---------------------------------------------------------- morceaux de page
+  // Retard sur la base : rebase nécessaire, avec les conflits prévus (calcul local, rien n'est touché).
+  const rebaseBanner = () => {
+    if (s.branch === s.base || !s.behind) return "";
+    const conf = s.conflicts || [];
+    return `<div class="ghp-rebase${conf.length ? " ko" : ""}">
+      ${ic(conf.length ? "alert" : "branch", conf.length ? "ko" : "wait")}
+      <div class="ghp-rebase-t"><b>Rebase nécessaire</b>
+        <div class="ghp-muted">${s.behind} commit${s.behind > 1 ? "s" : ""} de retard sur <code>${esc(s.base_ref)}</code> · ${conf.length ? `conflits prévus dans ${conf.length} fichier${conf.length > 1 ? "s" : ""}` : "sans conflit prévu"}</div>
+        ${conf.length ? `<div class="ghp-conf">${conf.slice(0, 8).map((f) => `<code>${esc(f)}</code>`).join("")}${conf.length > 8 ? `<span class="ghp-muted">+${conf.length - 8}</span>` : ""}</div>` : ""}
+      </div>
+      <button class="ghp-btn sm primary" data-rebase title="Confie le rebase et la résolution des conflits à Claude">${ic("claude")}Rebaser avec Claude</button>
+    </div>`;
+  };
   const localBar = () => {
     const onBase = s.branch === s.base;
     const facts = [
@@ -125,13 +162,12 @@ export async function openGithub(target, title, { toClaude } = {}) {
       !onBase && s.behind && `<span class="ghp-warn">${s.behind} de retard sur ${esc(s.base)}</span>`,
     ].filter(Boolean);
     return `<div class="ghp-local">
-      <div class="ghp-local-h">${icon("branch")}<span>Copie locale</span><code class="ghp-ref">${esc(s.branch)}</code><span class="ghp-muted">${facts.length ? facts.join(" · ") : "à jour"}</span></div>
+      <div class="ghp-local-h">${icon("branch")}<span>Copie locale</span>${refCopy(s.branch)}<span class="ghp-muted">${facts.length ? facts.join(" · ") : "à jour"}</span></div>
       <div class="ghp-row">
         <button class="ghp-btn sm" data-commit-open${s.dirty ? "" : " disabled"}>Committer…</button>
         <button class="ghp-btn sm" data-push${s.unpushed || (!s.upstream && !onBase) ? "" : " disabled"}>Pousser</button>
         <button class="ghp-btn sm" data-pull${s.unpulled ? "" : " disabled"}>Récupérer</button>
         ${onBase ? "" : `<button class="ghp-btn sm" data-merge-local${s.ahead && !s.dirty ? "" : " disabled"} title="Fusionner dans ${esc(s.base)} sans passer par GitHub">Fusionner en local</button>`}
-        ${!onBase && s.behind ? `<button class="ghp-btn sm" data-update>${ic("claude")}Se mettre à jour (Claude)</button>` : ""}
       </div>
       <div class="ghp-commit" hidden>
         <textarea class="ghp-input" rows="3" placeholder="Message de commit"></textarea>
@@ -140,6 +176,17 @@ export async function openGithub(target, title, { toClaude } = {}) {
       </div>
     </div>`;
   };
+
+  // Pile de PR empilées : de la plus proche de la base à la plus haute ; bascule du dossier.
+  const stackBox = (stack) => `<div class="ghp-stack">
+    <div class="ghp-side-h"><span>Pile de PR · ${stack.length}</span></div>
+    ${stack.map((p, i) => `<div class="ghp-stk${p.current ? " on" : ""}">
+      <span class="ghp-stk-n">${i + 1}</span>
+      <a href="${esc(p.url)}" target="_blank" rel="noopener" class="ghp-stk-t"><span class="ghp-muted">#${p.number}</span> ${esc(p.title)}</a>
+      ${p.draft ? `<span class="ghp-label">brouillon</span>` : ""}
+      ${p.current ? `<span class="ghp-label cur">actuelle</span>` : `<button class="ghp-btn xs" data-checkout="${p.number}" data-head="${esc(p.head)}">Basculer</button>`}
+    </div>`).join("")}
+  </div>`;
 
   const reviewersBox = (pr) => `<div class="ghp-side">
     <div class="ghp-side-h"><span>Relecteurs</span><button class="ghp-iconbtn" data-reviewers title="Demander une relecture">${ic("gear")}</button></div>
@@ -164,6 +211,8 @@ export async function openGithub(target, title, { toClaude } = {}) {
       ${t.resolved ? "" : `<button class="ghp-iconbtn" data-ask="t${i}" title="Confier ce fil à Claude">${ic("claude")}</button>`}</div>
     ${hunk(t.hunk)}
     ${t.comments.map((c) => `<div class="ghp-tc">${av(c.who, 24)}<div class="ghp-tc-b"><div class="ghp-tc-h"><b>${esc(shortLogin(c.who.login))}</b>${bot(c.who.login)}${when(c.at)}</div><div class="ghp-md">${cleanHtml(c.html)}</div></div></div>`).join("")}
+    ${(!t.resolved && t.can_resolve) || (t.resolved && t.can_unresolve) ? `<div class="ghp-thread-f">
+      <button class="ghp-btn sm" data-thread="${esc(t.id)}" data-act="${t.resolved ? "unresolve" : "resolve"}">${t.resolved ? "Rouvrir la conversation" : "Résoudre la conversation"}</button></div>` : ""}
   </div>`;
 
   const folded = (key, iconHtml, label, inner) => `<details class="ghp-fold" data-key="${key}"${opened.has(key) ? " open" : ""}>
@@ -217,7 +266,7 @@ export async function openGithub(target, title, { toClaude } = {}) {
             <a class="ghp-link" href="${esc(c.url || pr.url)}" target="_blank" rel="noopener">Détails</a></div>`).join("")}</div></details>`
           : `<div class="ghp-mrow">${ic("dot")}<div><b>Aucun check</b><div class="ghp-muted">Aucune CI ne tourne sur cette PR.</div></div></div>`}
         <div class="ghp-mrow">${conflict ? ic("alert", "ko") : ic("check", "ok")}<div><b>${conflict ? "Cette branche a des conflits" : "Aucun conflit avec la branche de base"}</b><div class="ghp-muted">${conflict ? "Ils doivent être résolus avant la fusion." : "La fusion peut se faire automatiquement."}</div></div>
-          ${conflict ? `<span style="flex:1"></span><button class="ghp-btn sm" data-conflicts>${ic("claude")}Résoudre (Claude)</button>` : ""}</div>
+          ${conflict ? `<span style="flex:1"></span><button class="ghp-btn sm" data-rebase>${ic("claude")}Rebaser avec Claude</button>` : ""}</div>
         ${mergeFoot(pr)}`}
       </div></div>`;
   };
@@ -257,8 +306,10 @@ export async function openGithub(target, title, { toClaude } = {}) {
       ${pr ? `<header class="ghp-head">
         <h2><a href="${esc(pr.url)}" target="_blank" rel="noopener">${esc(pr.title)}</a> <span class="ghp-num">#${pr.number}</span></h2>
         <div class="ghp-sub"><span class="ghp-state ${stKey}">${ic(stIcon)}${stLabel}</span>
-          <span><b>${esc(pr.author?.login || "")}</b> veut fusionner ${pr.commits} commit${pr.commits > 1 ? "s" : ""} dans <code class="ghp-ref">${esc(pr.base)}</code> depuis <code class="ghp-ref">${esc(pr.head || s.branch)}</code></span></div>
+          <span><b>${esc(pr.author?.login || "")}</b> veut fusionner ${pr.commits} commit${pr.commits > 1 ? "s" : ""} dans <code class="ghp-ref">${esc(pr.base)}</code> depuis ${refCopy(pr.head || s.branch)}</span></div>
       </header>` : `<header class="ghp-head"><h2>${esc(s.branch)}</h2><div class="ghp-sub ghp-muted">${onBase ? `Cette conversation travaille directement sur ${esc(s.base)}.` : "Pas de pull request pour cette branche."}</div></header>`}
+      ${pr?.stack?.length ? stackBox(pr.stack) : ""}
+      ${rebaseBanner()}
       ${localBar()}
       ${!s.has_gh ? `<div class="ghp-pad ghp-muted">gh n'est pas installé : la PR, la CI et les relectures ne sont pas disponibles.</div>`
         : s.gh_error ? `<div class="ghp-pad ghp-err">${esc(s.gh_error)}</div>`
@@ -301,13 +352,12 @@ export async function openGithub(target, title, { toClaude } = {}) {
     $("[data-commit-push]", body).addEventListener("click", (e) => commit(e.currentTarget, true));
     $("[data-push]", body).addEventListener("click", (e) => act(e.currentTarget, { action: "push" }, "Poussé."));
     $("[data-pull]", body).addEventListener("click", (e) => act(e.currentTarget, { action: "pull" }, "Récupéré."));
-    $("[data-merge-local]", body)?.addEventListener("click", (e) => {
-      if (confirm(`Fusionner ${s.branch} dans ${s.base}, dans le dépôt principal ?`)) act(e.currentTarget, { action: "merge_local" }, (r) => `${r.merged} fusionnée dans ${r.into}.`);
+    $("[data-merge-local]", body)?.addEventListener("click", async (e) => {
+      const b = e.currentTarget;
+      if (await confirmBox(`Fusionner ${s.branch} dans ${s.base}, dans le dépôt principal ?`, { ok: "Fusionner" })) act(b, { action: "merge_local" }, (r) => `${r.merged} fusionnée dans ${r.into}.`);
     });
-    $("[data-update]", body)?.addEventListener("click", () => ask(
-      `Mets la branche \`${s.branch}\` à jour avec \`origin/${s.base}\` : \`git fetch\`, puis fusionne \`origin/${s.base}\` dans la branche (pas de rebase, pas de push forcé). Résous les conflits éventuels en gardant l'intention des deux côtés, vérifie que ça compile et que les tests touchés passent, puis committe et pousse.`,
-      "La mise à jour"));
-    $("[data-pr]", body)?.addEventListener("click", (e) => { if (confirm(`Pousser ${s.branch} et créer une PR vers ${s.base} ?`)) act(e.currentTarget, { action: "pr" }, (r) => { if (r.url) window.open(r.url, "_blank"); return "PR créée."; }); });
+    $$("[data-rebase]", body).forEach((b) => b.addEventListener("click", () => ask(rebasePrompt(s), "Le rebase")));
+    $("[data-pr]", body)?.addEventListener("click", async (e) => { const b = e.currentTarget; if (await confirmBox(`Pousser ${s.branch} et créer une PR vers ${s.base} ?`, { ok: "Créer la PR" })) act(b, { action: "pr" }, (r) => { if (r.url) window.open(r.url, "_blank"); return "PR créée."; }); });
     $("[data-pr-draft]", body)?.addEventListener("click", (e) => act(e.currentTarget, { action: "pr", draft: true }, "PR brouillon créée."));
     if (!pr) return;
     const comment = $("[data-comment]", body);
@@ -333,9 +383,14 @@ export async function openGithub(target, title, { toClaude } = {}) {
       act(b, { action: "review", login: b.dataset.rerequest }, `Relecture redemandée à ${shortLogin(b.dataset.rerequest.replace(/^@/, ""))}.`)));
 
     const checks = pr.checks;
-    $("[data-conflicts]", body)?.addEventListener("click", () => ask(
-      `La PR #${pr.number} a des conflits avec \`${pr.base}\`. Fais \`git fetch\`, fusionne \`origin/${pr.base}\` dans la branche (pas de rebase, pas de push forcé), résous chaque conflit en gardant l'intention des deux côtés, vérifie que ça compile et que les tests touchés passent, puis committe et pousse.`,
-      "La résolution des conflits"));
+    $$("[data-thread]", body).forEach((b) => b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      act(b, { action: b.dataset.act, thread_id: b.dataset.thread }, b.dataset.act === "resolve" ? "Conversation résolue." : "Conversation rouverte.");
+    }));
+    $$("[data-checkout]", body).forEach((b) => b.addEventListener("click", async () => {
+      if (!(await confirmBox(`Basculer le dossier de la conversation sur #${b.dataset.checkout} (${b.dataset.head}) ?\n\nL'agent travaillera ensuite sur cette branche.`, { ok: "Basculer" }))) return;
+      act(b, { action: "checkout", number: +b.dataset.checkout }, (r) => `Dossier sur ${r.branch}.`);
+    }));
     $$("[data-rerun]", body).forEach((b) => b.addEventListener("click", (e) => { e.preventDefault(); act(b, { action: "rerun", run_id: +b.dataset.rerun }, "CI relancée."); }));
     $$("[data-fixci]", body).forEach((b) => b.addEventListener("click", async (e) => {
       e.preventDefault();
@@ -368,13 +423,14 @@ export async function openGithub(target, title, { toClaude } = {}) {
       method.dispatchEvent(new Event("change"));
     }));
     sync();
-    mergeBtn?.addEventListener("click", (e) => {
+    mergeBtn?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
       const auto = box("[data-auto]"), admin = box("[data-admin]"), force = box("[data-force]"), label = method.selectedOptions[0].textContent;
       const what = auto ? `Activer la fusion automatique (${label}) de la PR #${pr.number} ?`
         : admin ? `Contourner les règles du dépôt et fusionner la PR #${pr.number} vers ${pr.base} maintenant ?`
         : `${label} : PR #${pr.number} vers ${pr.base} ?`;
-      if (!confirm(what)) return;
-      act(e.currentTarget, { action: "merge", method: method.value, auto, admin, force }, (r) => (r.auto ? "Fusion automatique activée." : r.admin ? "PR fusionnée (règles contournées)." : "PR fusionnée."));
+      if (!(await confirmBox(what, { ok: admin ? "Contourner et fusionner" : "Fusionner", danger: admin }))) return;
+      act(btn, { action: "merge", method: method.value, auto, admin, force }, (r) => (r.auto ? "Fusion automatique activée." : r.admin ? "PR fusionnée (règles contournées)." : "PR fusionnée."));
     });
 
     // Prompts confiés à Claude : un commentaire, un fil, ou tous les fils non résolus (jamais les résolus).

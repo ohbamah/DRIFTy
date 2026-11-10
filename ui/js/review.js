@@ -1,6 +1,7 @@
 // Panneau « Changements » d'une conversation : état git du worktree, diff coloré,
 // commit (message écrit ou proposé par l'IA), fusion dans la base, PR.
 import { api, esc, icon, toast, loader, diffStat, $ } from "./lib.js";
+import { confirmBox } from "./confirm.js";
 
 /** Découpe un diff unifié par fichier, avec ses lignes ajoutées / retirées. */
 function files(diff) {
@@ -50,7 +51,7 @@ export async function openReview(target, title) {
         <button class="btn" data-pr${s.ahead && s.has_gh ? "" : " disabled"} title="${s.has_gh ? "" : "gh n'est pas installé"}">Créer une PR</button>
       </div>` : `<div class="muted small" style="margin-top:14px">Cette conversation travaille directement sur ${esc(s.base)}.</div>`}`;
     const act = (sel, path, okMsg, confirmMsg, extra = () => ({})) => body.querySelector(sel)?.addEventListener("click", async (e) => {
-      if (confirmMsg && !confirm(confirmMsg)) return;
+      if (confirmMsg && !(await confirmBox(confirmMsg))) return;
       e.target.disabled = true;
       try { const r = await api(path, { method: "POST", json: { ...target, ...extra() } }); toast(okMsg(r)); draw(); }
       catch (err) { toast(err.message, true); e.target.disabled = false; }

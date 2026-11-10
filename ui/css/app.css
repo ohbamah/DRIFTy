@@ -1377,3 +1377,47 @@ details[open] > summary .ghp-show::after { content: "Masquer"; }
 .sb-wt-row .sb-dots { margin-left: auto; }
 .sb-wt-row:hover .sb-dots, .sb-wt-row .sb-dots.open { display: inline-grid; }
 .arch-t svg { width: 13px; height: 13px; vertical-align: -2px; color: var(--muted); }
+/* bouton ⋯ : icône centrée dans son fond (le svg en ligne se calait sur la ligne de base) */
+.sb-dots { width: 22px; height: 22px; margin: -3px -4px -3px 0; padding: 0; line-height: 0; }
+.sb-dots svg { display: block; width: 16px; height: 16px; }
+
+/* confirmations maison (ui/js/confirm.js) */
+.ask-dlg .dlg { max-width: 460px; }
+.ask-t { font-size: 15px; line-height: 1.4; margin: 0; }
+.ask-b { font-size: 13px; color: var(--ink-2); white-space: pre-wrap; line-height: 1.5; }
+.btn.danger { background: var(--error); border-color: var(--error); color: #fff; }
+
+/* bouton ↓ : revenir en bas du fil */
+.detail { position: relative; }
+.jump-bottom { position: absolute; z-index: 6; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--pane); color: var(--ink-2); box-shadow: var(--shadow); cursor: pointer; animation: fade 0.18s var(--ease) both; }
+.jump-bottom:hover { color: var(--ink); border-color: var(--muted); }
+.jump-bottom svg { width: 16px; height: 16px; transform: rotate(90deg); }
+
+/* fils résolus depuis l'app, pile de PR */
+.ghp-thread-f { padding: 8px 16px 12px; border-top: 1px solid var(--g-border-soft); background: var(--g-subtle); }
+.ghp-stack { margin: 12px 16px 0; padding: 10px 12px; border: 1px solid var(--g-border); border-radius: 6px; display: flex; flex-direction: column; gap: 4px; }
+.ghp-stk { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; font-size: 13px; }
+.ghp-stk.on { background: var(--g-ref-bg); }
+.ghp-stk-n { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--g-border); font-size: 11px; color: var(--g-muted); flex: none; }
+.ghp-stk.on .ghp-stk-n { border-color: var(--g-accent); color: var(--g-accent); }
+.ghp-stk-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-fg); }
+.ghp-stk-t:hover { color: var(--g-accent); text-decoration: underline; }
+.ghp-label.cur { color: var(--g-accent); border-color: var(--g-accent); }
+.ctx-pop label.check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
+.event.notice { color: var(--waste); }
+
+/* rebase nécessaire (panneau GitHub) */
+.ghp-rebase { display: flex; align-items: flex-start; gap: 10px; margin: 12px 16px 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--g-wait) 45%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--g-wait) 8%, transparent); font-size: 13px; }
+.ghp-rebase.ko { border-color: color-mix(in srgb, var(--g-ko) 45%, transparent); background: color-mix(in srgb, var(--g-ko) 8%, transparent); }
+.ghp-rebase > .gi { margin-top: 2px; }
+.ghp-rebase-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ghp-rebase-t b { font-weight: 600; }
+.ghp-rebase-t .ghp-muted { font-size: 12px; }
+.ghp-conf { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.ghp-conf code { font-size: 11.5px; padding: 1px 6px; border-radius: 6px; background: var(--g-code); }
+
+/* copier un nom de branche (panneau GitHub) */
+.ghp-copy { display: inline-grid; place-items: center; width: 22px; height: 22px; margin-left: -4px; border: 0; border-radius: 6px; background: none; color: var(--g-muted); cursor: pointer; vertical-align: middle; }
+.ghp-copy:hover { background: var(--g-btn-hover); color: var(--g-fg); }
+.ghp-copy svg { width: 13px; height: 13px; }
+.ghp-copy.done { color: var(--g-ok); }

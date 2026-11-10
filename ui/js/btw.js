@@ -2,7 +2,7 @@
 // modifier ni interrompre l'agent. Panneau au-dessus de la saisie : la réponse, l'historique
 // des questions annexes (◀ ▶, ou Maj+← / Maj+→), et ce qu'on peut en faire : copier,
 // insérer dans la saisie, envoyer à l'agent, ouvrir une branche (fork) qui part de là.
-import { api, esc, icon, toast, $ } from "./lib.js";
+import { api, esc, icon, toast, $, copyText } from "./lib.js";
 import { md } from "./md.js";
 
 const KEY = (t) => "drifty.btw." + new URLSearchParams(t).toString();
@@ -62,7 +62,7 @@ export function openBtw(composerEl, opts) {
     $("[data-prev]", panel)?.addEventListener("click", () => { pos = Math.max(0, pos - 1); draw(); });
     $("[data-next]", panel)?.addEventListener("click", () => { pos = Math.min(hist.length - 1, pos + 1); draw(); });
     const a = hist[pos];
-    $("[data-copy]", panel)?.addEventListener("click", async () => { await navigator.clipboard.writeText(a.response).catch(() => {}); toast("Réponse copiée."); });
+    $("[data-copy]", panel)?.addEventListener("click", async () => { (await copyText(a.response)) ? toast("Réponse copiée.") : toast("Copie impossible.", true); });
     $("[data-insert]", panel)?.addEventListener("click", () => { opts.insert(a.response); close(); });
     $("[data-send]", panel)?.addEventListener("click", () => { opts.send(`À propos de ma question annexe « ${a.question} », tu as répondu :\n\n${a.response}`); close(); });
     $("[data-fork]", panel)?.addEventListener("click", async (e) => {

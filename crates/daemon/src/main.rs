@@ -3,12 +3,14 @@
 //! réécrit dans un autre langage sans la toucher.
 
 mod chat;
+mod claude_update;
 mod commands;
 mod evaluate;
 mod github;
 mod setup;
 mod side;
 mod term;
+mod usage_cmd;
 mod web;
 mod worktrees;
 mod sounds;
@@ -953,6 +955,18 @@ struct ContextBar {
     mode: String,
     tokens_cap: f64,
     budget_usd: f64,
+    /// Compacter (`/compact`) quand la jauge des tokens atteint 100 %.
+    #[serde(default = "yes")]
+    auto_compact: bool,
+    /// Arrêter la discussion quand son coût atteint 99 % du budget.
+    #[serde(default = "yes")]
+    stop_at_budget: bool,
+}
+
+impl ContextBar {
+    fn limits(&self) -> chat::Limits {
+        chat::Limits { tokens_mode: self.mode != "budget", tokens_cap: self.tokens_cap, budget_usd: self.budget_usd, auto_compact: self.auto_compact, stop_at_budget: self.stop_at_budget }
+    }
 }
 
 fn read_context_bar(c: &Connection) -> Result<ContextBar> {
@@ -961,6 +975,8 @@ fn read_context_bar(c: &Connection) -> Result<ContextBar> {
         mode: get("ctx_mode", "tokens")?,
         tokens_cap: get("ctx_tokens_cap", "1000000000")?.parse().unwrap_or(1e9),
         budget_usd: get("ctx_budget_usd", "50")?.parse().unwrap_or(50.0),
+        auto_compact: get("ctx_auto_compact", "1")? == "1",
+        stop_at_budget: get("ctx_stop_budget", "1")? == "1",
     })
 }
 
@@ -969,6 +985,7 @@ async fn context_bar_get(State(app): State<App>) -> ApiResult {
 }
 
 async fn context_bar_set(State(app): State<App>, Json(b): Json<ContextBar>) -> ApiResult {
+    let app_limits = app.chats.clone();
     with_conn(&app, move |c| {
         if b.mode != "tokens" && b.mode != "budget" {
             anyhow::bail!("The bar mode `{}` cannot be used because only `tokens` and `budget` exist.", b.mode);
@@ -979,9 +996,16 @@ async fn context_bar_set(State(app): State<App>, Json(b): Json<ContextBar>) -> A
         db::set_setting(c, "ctx_mode", &b.mode)?;
         db::set_setting(c, "ctx_tokens_cap", &b.tokens_cap.to_string())?;
         db::set_setting(c, "ctx_budget_usd", &b.budget_usd.to_string())?;
+        db::set_setting(c, "ctx_auto_compact", if b.auto_compact { "1" } else { "0" })?;
+        db::set_setting(c, "ctx_stop_budget", if b.stop_at_budget { "1" } else { "0" })?;
         Ok(serde_json::to_value(read_context_bar(c)?)?)
     })
     .await
+    .inspect(|v| {
+        if let Ok(b) = serde_json::from_value::<ContextBar>(v.0.clone()) {
+            app_limits.set_limits(b.limits()); // appliqué tout de suite aux discussions en cours
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -1207,8 +1231,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let limits = read_context_bar(&conn).map(|b| b.limits()).unwrap_or_default();
     let app = App {
-        chats: chat::Hub::default(),
+        chats: {
+            let h = chat::Hub::default();
+            h.set_limits(limits);
+            h
+        },
         jobs: commands::Jobs::default(),
         models: Arc::new(models::Cache::default()),
         read: Arc::new(Mutex::new(conn)),
@@ -1271,6 +1300,9 @@ async fn main() -> Result<()> {
         .route("/api/commands", get(side::commands))
         .route("/api/btw", post(side::btw))
         .route("/api/events", get(events))
+        .route("/api/usage/refresh", post(usage_cmd::refresh))
+        .route("/api/claude-update", get(claude_update::route))
+        .route("/api/claude-update/run", post(claude_update::run))
         .route("/api/sessions/{id}/title", put(conv_rename))
         .route("/api/chats/{id}/title", put(chat_rename))
         .route("/api/sessions/{id}/archive", post(conv_archive).delete(conv_unarchive))
@@ -1296,6 +1328,7 @@ async fn main() -> Result<()> {
         .route("/api/gh", get(github::get_state))
         .route("/api/gh/reviewers", get(github::get_reviewers))
         .route("/api/gh/log", get(github::get_log))
+        .route("/api/branch", get(github::get_branch))
         .route("/api/gh/action", post(github::post_action))
         .route("/api/repos/{id}/setup", get(setup::route_get).put(setup::route_set))
         .route("/api/repos/{id}/setup/analyze", post(setup::route_analyze))

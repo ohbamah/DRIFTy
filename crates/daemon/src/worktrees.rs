@@ -84,9 +84,14 @@ pub async fn archive(State(app): State<App>, Path(repo_id): Path<i64>, Json(r): 
     let removed = exists && !r.keep_folder;
     if removed {
         let (p, rt) = (path.clone(), root.clone());
-        tokio::task::spawn_blocking(move || git(&rt, &["worktree", "remove", &p]))
-            .await?
-            .map_err(|e| anyhow::anyhow!("The worktree cannot be archived because git refused to remove its folder: {e}"))?;
+        // Propre (vérifié plus haut) mais avec des sous-modules : git exige --force pour ce seul motif.
+        tokio::task::spawn_blocking(move || {
+            git(&rt, &["worktree", "remove", &p]).or_else(|e| {
+                if e.to_string().contains("submodule") { git(&rt, &["worktree", "remove", "--force", &p]) } else { Err(e) }
+            })
+        })
+        .await?
+        .map_err(|e| anyhow::anyhow!("The worktree cannot be archived because git refused to remove its folder: {e}"))?;
     }
     let wt = r.worktree.clone();
     with_conn(&app, move |c| {

@@ -1,11 +1,13 @@
 // Chat dans l'app : un processus `claude` piloté par le démon, suivi en direct.
-import { api, esc, usd, tok, dur, icon, slotChip, toast, loader, imageStrip, diffStat, modelLabel, $, $$ } from "../lib.js";
+import { api, esc, usd, tok, turnEnd, icon, slotChip, toast, loader, imageStrip, diffStat, modelLabel, $, $$ } from "../lib.js";
 import { md } from "../md.js";
 import { attachImprove } from "../improve.js";
 import { attachSlash } from "../slash.js";
 import { openBtw, forkMessage } from "../btw.js";
 import { token, withElements, userText } from "../elements.js";
+import { toBottom, jumpButton } from "../jump.js";
 import { replyActions, bindReplies } from "../reply.js";
+import { confirmBox } from "../confirm.js";
 
 let source = null; // flux SSE du chat affiché (un seul à la fois)
 
@@ -302,7 +304,7 @@ async function promptApplyPop(anchor, repoId, insert) {
   box.addEventListener("click", async (e) => {
     const del = e.target.closest("[data-del]");
     if (del) {
-      if (!confirm("Supprimer ce prompt ?")) return;
+      if (!(await confirmBox("Supprimer ce prompt ?", { ok: "Supprimer", danger: true }))) return;
       await api(`/api/prompts/${del.dataset.del}`, { method: "DELETE" }).catch((err) => toast(err.message, true));
       list.splice(list.findIndex((p) => p.id === +del.dataset.del), 1);
       return draw(pop.querySelector("input.field")?.value || "");
@@ -425,7 +427,9 @@ export function barSettings(anchor, onSaved) {
   pop.innerHTML = `
     <div class="seg" data-mode><button type="button" data-v="tokens" class="${cfg.mode === "tokens" ? "on" : ""}">Tokens</button><button type="button" data-v="budget" class="${cfg.mode === "budget" ? "on" : ""}">Budget</button></div>
     <label data-for="tokens">100 % à<input class="field" type="number" min="1000" step="1000000" value="${cfg.tokens_cap}"><span class="muted small">tokens</span></label>
+    <label class="check" data-for="tokens"><input type="checkbox" data-auto-compact${cfg.auto_compact !== false ? " checked" : ""}> Auto-compact à 100 %</label>
     <label data-for="budget">100 % à<input class="field" type="number" min="0.01" step="1" value="${cfg.budget_usd}"><span class="muted small">$</span></label>
+    <label class="check" data-for="budget"><input type="checkbox" data-stop-at${cfg.stop_at_budget !== false ? " checked" : ""}> Arrêter la discussion à 99 % du budget</label>
     <div class="foot"><button class="btn" type="button" data-cancel>Annuler</button><button class="btn primary" type="button" data-save>Enregistrer</button></div>`;
   document.body.append(pop);
   const r = anchor.getBoundingClientRect();
@@ -444,9 +448,10 @@ export function barSettings(anchor, onSaved) {
   addEventListener("mousedown", outside);
   pop.querySelector("[data-cancel]").addEventListener("click", close);
   pop.querySelector("[data-save]").addEventListener("click", async () => {
-    const [tk, bd] = [...pop.querySelectorAll("input")].map((i) => Number(i.value));
+    const [tk, bd] = [...pop.querySelectorAll("input[type=number]")].map((i) => Number(i.value));
+    const auto_compact = pop.querySelector("[data-auto-compact]").checked, stop_at_budget = pop.querySelector("[data-stop-at]").checked;
     try {
-      barCfg = await api("/api/settings/context-bar", { method: "PUT", json: { mode, tokens_cap: tk, budget_usd: bd } });
+      barCfg = await api("/api/settings/context-bar", { method: "PUT", json: { mode, tokens_cap: tk, budget_usd: bd, auto_compact, stop_at_budget } });
       close();
       onSaved();
     } catch (e) { toast(e.message, true); }
@@ -676,6 +681,7 @@ export async function renderLive(box, chatId, onMeta) {
         queued.delete(ev.id);
       }
       else if (ev.kind === "status") setStatus(ev.status);
+      else if (ev.kind === "notice") add(`<div class="event notice">${esc(ev.text)}</div>`);
       else if (ev.kind === "permission_resolved") {
         const card = thread.querySelector(`[data-perm="${CSS.escape(ev.request_id)}"]`);
         if (card) { card.classList.add(ev.allow ? "ok" : "no"); card.querySelector(".perm-actions").innerHTML = `<span class="small">${ev.allow ? "Autorisé" : "Refusé"}</span>`; }
@@ -732,11 +738,8 @@ export async function renderLive(box, chatId, onMeta) {
       if (live) { live.remove(); live = null; }
       cost += ev.total_cost_usd || 0;
       const u = ev.usage || {};
-      // Fin du tour : heure (et jour s'il n'est pas aujourd'hui), durée, coût, tokens écrits.
-      const end = new Date(at || Date.now());
-      const today = end.toDateString() === new Date().toDateString();
-      const when = end.toLocaleString("fr-FR", today ? { hour: "2-digit", minute: "2-digit" } : { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-      add(`<div class="event" title="${esc(end.toLocaleString("fr-FR"))}">${ev.is_error ? "Erreur" : "Terminé"} à ${esc(when)}${ev.duration_ms ? ` · ${dur(ev.duration_ms)}` : ""} · ${usd(ev.total_cost_usd || 0)} · ${tok((u.output_tokens || 0))} tokens écrits</div>`);
+      // Fin du tour : heure, durée, coût, tokens écrits.
+      add(`<div class="event" title="${esc(new Date(at || Date.now()).toLocaleString("fr-FR"))}">${ev.is_error ? "Erreur" : "Terminé"} ${esc(turnEnd(at, ev.duration_ms))} · ${usd(ev.total_cost_usd || 0)} · ${tok((u.output_tokens || 0))} tokens écrits</div>`);
       curReply = null;
       onMeta?.({ cost });
     }
@@ -750,6 +753,7 @@ export async function renderLive(box, chatId, onMeta) {
     handle(ev, at);
   };
   source.onerror = () => {}; // le navigateur se reconnecte seul ; le rejeu est dédoublonné par `seq`
-  scroller.scrollTop = scroller.scrollHeight;
+  toBottom(scroller);
+  jumpButton(scroller, scroller.parentElement);
   $("textarea", comp).focus();
 }

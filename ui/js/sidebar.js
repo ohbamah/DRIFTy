@@ -6,6 +6,8 @@ import { store, subscribe, ensureLoaded, convsFor, reload } from "./store.js";
 import { openMenu } from "./select.js";
 import { newChatDialog } from "./views/chat.js";
 import { editProject } from "./views/project.js";
+import { confirmBox } from "./confirm.js";
+import { openJob } from "./run.js";
 
 const PER_GROUP = 5;
 const ui = { query: "", expanded: new Set(), open: new Set() };
@@ -125,7 +127,7 @@ async function archiveRow(row) {
   const { chat, sid } = row.dataset;
   if (!sid) return toast("Cette discussion n'a pas encore de conversation à archiver : attends sa première réponse.", true);
   const live = chat && store.chats.find((c) => c.id === chat && c.status !== "exited");
-  if (live && !confirm("Cette discussion tourne encore : l'arrêter et l'archiver ?")) return;
+  if (live && !(await confirmBox("Cette discussion tourne encore : l'arrêter et l'archiver ?", { ok: "Arrêter et archiver" }))) return;
   try {
     if (live) await api(`/api/chats/${chat}`, { method: "DELETE" });
     await api(`/api/sessions/${sid}/archive`, { method: "POST" });
@@ -138,14 +140,19 @@ async function archiveRow(row) {
 
 async function archiveWorktree({ repo, wt, n }) {
   const live = store.chats.filter((c) => c.repo_id === +repo && c.worktree === wt && c.status !== "exited").length;
-  if (!confirm(`Archiver le worktree « ${wt} » ?\n\n• ses ${n} conversation(s) passent dans les réglages du projet ;\n• son dossier est retiré, sa branche est gardée (restaurable) ;${live ? `\n• ${live} discussion(s) en cours s'arrêtent.` : ""}`)) return;
+  const lines = [
+    `${+n > 1 ? `ses ${n} conversations passent` : "sa conversation passe"} dans les réglages du projet`,
+    "son dossier est retiré, sa branche gardée (restaurable)",
+    live ? `${live > 1 ? `${live} discussions en cours s'arrêtent` : "sa discussion en cours s'arrête"}` : "",
+  ].filter(Boolean);
+  if (!(await confirmBox(`Archiver le worktree « ${wt} » ?\n\n${lines.map((l, i) => `• ${l}${i < lines.length - 1 ? " ;" : "."}`).join("\n")}`, { ok: "Archiver" }))) return;
   const go = (keep_folder) => api(`/api/repos/${repo}/worktrees/archive`, { method: "POST", json: { worktree: wt, keep_folder } });
   try {
     try { await go(false); }
     catch (err) {
       if (!/would be lost/.test(err.message)) throw err;
       const files = (/(\d+) file/.exec(err.message) || [, "?"])[1];
-      if (!confirm(`« ${wt} » a ${files} fichier(s) non commité(s). Archiver quand même en GARDANT son dossier (rien n'est supprimé) ?`)) return;
+      if (!(await confirmBox(`« ${wt} » a ${files} fichier(s) non commité(s).\n\nArchiver quand même en GARDANT son dossier ? Rien n'est supprimé.`, { ok: "Archiver en gardant le dossier" }))) return;
       await go(true);
     }
     toast(`Worktree « ${wt} » archivé.`);
@@ -270,6 +277,7 @@ async function drawUsage() {
 export async function mountSidebar(el) {
   el.innerHTML = `
     <div class="sb-head" data-tauri-drag-region="deep"><span class="sb-brand">${document.getElementById("mark-tpl")?.innerHTML || ""}<span class="brand-word">DRIFT<i>y</i></span></span>
+      <button class="claude-upd" id="claude-upd" type="button" hidden></button>
       <button class="icon-btn" id="sb-toggle" title="Masquer la barre">${icon("sidebar")}</button></div>
     <label class="sb-search">${icon("search")}<input id="sb-q" placeholder="Rechercher" autocomplete="off"></label>
     <nav class="sb-nav">
@@ -332,6 +340,28 @@ export async function mountSidebar(el) {
       toggleProject(row);
     }
   });
+  // Mise à jour de Claude Code disponible : pastille à côté du logo (vérifiée toutes les heures).
+  const upd = $("#claude-upd", el);
+  const checkUpdate = async () => {
+    const u = await api("/api/claude-update").catch(() => null);
+    upd.hidden = !u?.outdated;
+    if (!u?.outdated) return;
+    upd.textContent = `Claude ${u.latest}`;
+    upd.title = `Mise à jour de Claude Code : ${u.installed} → ${u.latest}\nCommande : ${u.command}`;
+    upd.onclick = async () => {
+      if (!(await confirmBox(`Mettre à jour Claude Code ${u.installed} → ${u.latest} ?\n\nCommande lancée : ${u.command}\nLes discussions en cours gardent l'ancienne version jusqu'à leur reprise.`, { ok: "Mettre à jour" }))) return;
+      try {
+        const r = await api("/api/claude-update/run", { method: "POST" });
+        openJob(r.id, "Mise à jour de Claude Code");
+        const wait = setInterval(async () => {
+          const j = await api(`/api/run/${r.id}?from=999999999`).catch(() => null);
+          if (j?.done) { clearInterval(wait); checkUpdate(); }
+        }, 2000);
+      } catch (err) { toast(err.message, true); }
+    };
+  };
+  checkUpdate();
+  setInterval(checkUpdate, 3600_000);
   subscribe(drawTree);
   addEventListener("hashchange", () => { drawNav(); drawTree(); });
   drawNav();

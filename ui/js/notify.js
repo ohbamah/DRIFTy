@@ -10,7 +10,7 @@ export const EVENTS = {
   done: "Agent qui a fini",
   permission: "Autorisation demandée",
 };
-export const SOUNDS = { cloche: "Cloche", goutte: "Goutte", carillon: "Carillon", bip: "Bip", doux: "Doux", faahhh: "Faahhh", aucun: "Aucun" };
+export const SOUNDS = { cloche: "Cloche", goutte: "Goutte", carillon: "Carillon", bip: "Bip", doux: "Doux", faahhh: "Faahhh", carhonk: "CarHonk", aucun: "Aucun" };
 
 /** Tous les sons proposés : préinstallés, puis ceux de l'utilisateur. */
 export function soundList() {
@@ -37,7 +37,7 @@ export async function loadNotifyCfg(force = false) {
 // ------------------------------------------------------------ sons (Web Audio)
 let ctx = null;
 const buffers = new Map(); // sons en fichier (préinstallés ou de l'utilisateur), décodés une fois
-const BUNDLED = { faahhh: "/ui/sounds/faahhh.mp3" }; // préinstallés en fichier
+const BUNDLED = { faahhh: "/ui/sounds/faahhh.mp3", carhonk: "/ui/sounds/carhonk.mp3" }; // préinstallés en fichier
 async function playFile(url, volume) {
   let buf = buffers.get(url);
   if (!buf) {

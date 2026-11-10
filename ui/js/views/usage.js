@@ -97,6 +97,8 @@ export async function show(root) {
     <section id="activity"></section>
   </div></div>`;
   const box = $("#usage", root);
+  // Relevé frais des comptes (sans session) à l'ouverture de la page, puis redessin.
+  api("/api/usage/refresh", { method: "POST" }).then((r) => { if (r.refreshed?.length && document.body.contains(box)) show(root); }).catch(() => {});
   await Promise.all([renderCards(box, true), analytics.render($("#activity", root))]);
   // Les jauges se relisent toutes les 5 s : simple lecture du relevé local, aucune synchronisation.
   clearInterval(timer);

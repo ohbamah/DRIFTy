@@ -39,6 +39,31 @@ export function dur(ms) {
   const h = Math.floor(m / 60);
   return m % 60 ? `${h} h ${String(m % 60).padStart(2, "0")}` : `${h} h`;
 }
+/** Fin d'un tour : « à 15:51 · 12 min » (avec le jour s'il n'est pas aujourd'hui). Un seul point
+ * pour la discussion en direct et le transcript d'une conversation passée. */
+export function turnEnd(ts, durationMs) {
+  const end = new Date(ts || Date.now());
+  const today = end.toDateString() === new Date().toDateString();
+  const when = end.toLocaleString("fr-FR", today ? { hour: "2-digit", minute: "2-digit" } : { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return `à ${when}${durationMs ? ` · ${dur(durationMs)}` : ""}`;
+}
+
+/** Copie un texte ; `true` si c'est fait. Repli sur une sélection quand le presse-papiers
+ * moderne manque ou refuse (certaines vues web de l'app). */
+export async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+  (document.querySelector("dialog[open]") || document.body).append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  return ok;
+}
+
 export const usd = (x) => (x == null ? "—" : x > 0 && x < 0.005 ? "< $0,01" : "$" + nf.format(Math.round(x * 100) / 100));
 export const pct = (x, d = 1) => (x == null ? "—" : (x * 100).toFixed(d).replace(".", ",") + " %");
 export const date = (ts) =>

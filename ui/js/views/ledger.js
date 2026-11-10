@@ -4,6 +4,7 @@ import { store, ensureLoaded } from "../store.js";
 
 const KIND = { improve: "Amélioration de prompt", evaluate: "Évaluation par agent" };
 import { bars } from "../chart.js";
+import { confirmBox } from "../confirm.js";
 
 // Balance : penche du côté le plus lourd (échelle log, bornée à 14°).
 function beam(left, right) {
@@ -119,7 +120,7 @@ async function drawRules(box) {
       </tr>`).join("")}
     </table></div>`).join("");
   box.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Retirer cette règle du CLAUDE.md du projet ?")) return;
+    if (!(await confirmBox("Retirer cette règle du CLAUDE.md du projet ?", { ok: "Retirer" }))) return;
     try {
       await api(`/api/repos/${b.dataset.repo}/rules/${encodeURIComponent(b.dataset.rm)}`, { method: "DELETE" });
       toast("Règle retirée du CLAUDE.md.");

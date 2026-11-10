@@ -70,3 +70,22 @@ mountSidebar($("#sidebar")).then(route);
 startNotifications();
 autoSelects(document.body); // menus déroulants maison partout
 startKeys();
+
+// Usage des comptes : relevé par `claude -p /usage` (sans session), toutes les 2 min tant que
+// l'app est visible ; le serveur ne relance pas un compte plus d'une fois par minute.
+const refreshUsage = () => !document.hidden && api("/api/usage/refresh", { method: "POST" }).catch(() => {});
+refreshUsage();
+setInterval(refreshUsage, 120_000);
+
+// Guillemets droits : la substitution typographique de macOS (“ ” ‘ ’) est annulée pendant la
+// frappe — dans un prompt ou du code, `"` doit rester `"`. Un texte COLLÉ est gardé tel quel.
+document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLTextAreaElement || (t instanceof HTMLInputElement && /^(text|search|url)$/.test(t.type)))) return;
+  // Seulement ce qui vient d'être tapé (juste avant le curseur) : le reste du champ n'est pas touché.
+  if (!e.data || !/[“”‘’]/.test(e.data) || /^insertFrom/.test(e.inputType || "")) return;
+  const end = t.selectionStart, start = Math.max(0, end - e.data.length);
+  const fixed = t.value.slice(start, end).replace(/[“”]/g, '"').replace(/[‘’]/g, "'"); // même longueur
+  t.value = t.value.slice(0, start) + fixed + t.value.slice(end);
+  t.setSelectionRange(end, end);
+}, true);
