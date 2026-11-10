@@ -37,6 +37,8 @@ pub struct LaunchSpec {
     pub cost_base: f64,
     /// Modèle demandé (`claude-opus-5-5`, alias…) ; `None` = réglage du compte.
     pub model: Option<String>,
+    /// Reprise en BRANCHE (`--fork-session`) : une nouvelle conversation part de celle reprise.
+    pub fork: bool,
 }
 
 struct State {
@@ -91,7 +93,6 @@ pub fn check_images(images: &[Image]) -> Result<()> {
 pub struct Chat {
     pub id: String,
     pub repo_id: i64,
-    pub name: String,
     pub cwd: String,
     pub slot: Option<String>,
     pub bypass: bool,
@@ -100,7 +101,11 @@ pub struct Chat {
     /// Conversation reprise (même session) : son historique précède le direct.
     pub resume_of: Option<String>,
     pub setup_job: Option<String>,
+    /// Nom affiché, renommable.
+    title: Mutex<String>,
     state: Mutex<State>,
+    /// Requêtes de contrôle dont on attend la réponse (question annexe), par identifiant.
+    waiters: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>,
     tx: broadcast::Sender<Value>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     child: tokio::sync::Mutex<Option<Child>>,
@@ -150,7 +155,7 @@ impl Chat {
     pub fn summary(&self) -> Value {
         let st = self.state.lock().unwrap();
         json!({
-            "id": self.id, "repo_id": self.repo_id, "name": self.name, "cwd": self.cwd, "slot": self.slot,
+            "id": self.id, "repo_id": self.repo_id, "name": *self.title.lock().unwrap(), "cwd": self.cwd, "slot": self.slot,
             "bypass": self.bypass, "worktree": self.worktree, "created": self.created, "resume_of": self.resume_of, "setup_job": self.setup_job,
             "session_id": st.session_id, "status": st.status, "pending": st.pending.len(), "cost_usd": st.cost_usd, "tokens_total": st.tokens, "model": st.model,
             "unread": unread(st.status, st.finished_at, st.seen_at),
@@ -243,6 +248,23 @@ impl Chat {
         Ok(text)
     }
 
+    /// « Envoyer maintenant » : le message quitte la file et part tout de suite à Claude Code,
+    /// qui le prend en compte en plein tour (à la prochaine étape), sans l'interrompre.
+    pub async fn send_now(&self, qid: &str) -> Result<()> {
+        let (text, images) = {
+            let mut st = self.state.lock().unwrap();
+            let pos = st
+                .queue
+                .iter()
+                .position(|(id, _, _)| id == qid)
+                .ok_or_else(|| anyhow::anyhow!("The message cannot be sent now because it has already been sent to Claude."))?;
+            let (_, text, images) = st.queue.remove(pos);
+            (text, images)
+        };
+        self.emit(json!({"type": "claudius", "kind": "unqueued", "id": qid}));
+        self.transmit(&text, images).await
+    }
+
     /// Claude a fini son tour : on lui transmet le message suivant de la file, s'il y en a un.
     async fn next_in_queue(&self) {
         let next = {
@@ -283,6 +305,39 @@ impl Chat {
             anyhow::bail!("The model `{m}` cannot be used because it is not a valid model name.");
         }
         self.write(&json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "set_model", "model": m}})).await
+    }
+
+    /// Question annexe (`/btw`) : répondue d'après la conversation, sans la modifier, même
+    /// pendant que l'agent travaille.
+    pub async fn side_question(&self, question: &str, history: Value) -> Result<String> {
+        let rid = new_id();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiters.lock().unwrap().insert(rid.clone(), tx);
+        let sent = self
+            .write(&json!({"type": "control_request", "request_id": rid, "request": {"subtype": "side_question", "question": question, "history": history}}))
+            .await;
+        if let Err(e) = sent {
+            self.waiters.lock().unwrap().remove(&rid);
+            return Err(e);
+        }
+        let r = tokio::time::timeout(std::time::Duration::from_secs(660), rx).await;
+        self.waiters.lock().unwrap().remove(&rid);
+        let r = r
+            .map_err(|_| anyhow::anyhow!("The side question cannot be answered because Claude did not answer within 11 minutes."))?
+            .map_err(|_| anyhow::anyhow!("The side question cannot be answered because the chat stopped."))?;
+        if r["subtype"] == "success" {
+            Ok(r.pointer("/response/response").and_then(Value::as_str).unwrap_or("").to_string())
+        } else {
+            anyhow::bail!("The side question cannot be answered because Claude said: {}", r["error"].as_str().unwrap_or("unknown error"))
+        }
+    }
+
+    pub fn rename(&self, name: &str) {
+        *self.title.lock().unwrap() = name.to_string();
+    }
+
+    pub fn session_id(&self) -> Option<String> {
+        self.state.lock().unwrap().session_id.clone()
     }
 
     pub async fn interrupt(&self) -> Result<()> {
@@ -329,6 +384,9 @@ impl Hub {
         }
         if let Some(sid) = &spec.resume {
             cmd.args(["--resume", sid]);
+            if spec.fork {
+                cmd.arg("--fork-session");
+            }
         }
         // `~/.claude` est le dossier par défaut : ne pas le forcer (la variable déplace aussi l'identification).
         let default_dir = claudius_core::home().join(".claude");
@@ -346,7 +404,6 @@ impl Hub {
         let chat = Arc::new(Chat {
             id: new_id(),
             repo_id: spec.repo_id,
-            name: spec.name,
             cwd: spec.cwd,
             slot: spec.slot.clone(),
             bypass: spec.bypass,
@@ -354,10 +411,13 @@ impl Hub {
             created: now_ms(),
             resume_of: spec.resume.clone(),
             setup_job: spec.setup_job.clone(),
+            title: Mutex::new(spec.name.clone()),
+            waiters: Mutex::new(HashMap::new()),
             state: Mutex::new(State {
                 events: Vec::new(),
                 seq: 0,
-                session_id: spec.resume.clone(),
+                // Une branche reçoit son propre identifiant (annoncé à l'ouverture).
+                session_id: if spec.fork { None } else { spec.resume.clone() },
                 status: "idle",
                 pending: HashMap::new(),
                 cost_usd: spec.cost_base,
@@ -392,6 +452,15 @@ impl Hub {
                             st.session_id = ev["session_id"].as_str().map(str::to_string);
                             if let Some(m) = ev["model"].as_str() {
                                 st.model = Some(m.to_string());
+                            }
+                        }
+                        // Réponse attendue (question annexe) : remise à celui qui l'attend.
+                        Some("control_response")
+                            if ev.pointer("/response/request_id").and_then(Value::as_str).is_some_and(|r| chat.waiters.lock().unwrap().contains_key(r)) =>
+                        {
+                            let rid = ev.pointer("/response/request_id").and_then(Value::as_str).unwrap_or("").to_string();
+                            if let Some(tx) = chat.waiters.lock().unwrap().remove(&rid) {
+                                let _ = tx.send(ev["response"].clone());
                             }
                         }
                         // Réponse à un changement de modèle : le nouveau modèle en service.

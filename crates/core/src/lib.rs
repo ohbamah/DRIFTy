@@ -13,6 +13,7 @@ pub mod raw;
 pub mod repos;
 pub mod rule_effects;
 pub mod search;
+pub mod convs;
 pub mod transcript;
 pub mod usage;
 

@@ -43,10 +43,12 @@ const APP_JS: &str = r#"(() => {
   const external = (u) => {
     try { const x = new URL(u, location.href); return x.origin === location.origin ? null : x.href; } catch { return null; }
   };
+  // Lien externe : navigateur du système (plugin opener), sinon navigation refusée par l'app.
+  const openOut = (x) => { const o = window.__TAURI__ && window.__TAURI__.opener; if (o && o.openUrl) o.openUrl(x).catch(() => location.assign(x)); else location.assign(x); };
   const open = window.open;
   window.open = function (u, ...rest) {
     const x = u == null ? null : external(String(u));
-    if (x) { location.assign(x); return null; }
+    if (x) { openOut(x); return null; }
     return open.call(window, u, ...rest);
   };
   window.addEventListener("click", (e) => {
@@ -55,7 +57,7 @@ const APP_JS: &str = r#"(() => {
     const x = a && external(a.href);
     if (!x) return;
     e.preventDefault();
-    location.assign(x);
+    openOut(x);
   });
 })();"#;
 
@@ -128,11 +130,17 @@ fn build_window(app: &tauri::AppHandle, origin: Url) -> tauri::Result<WebviewWin
         .build()
 }
 
-/// La page de démarrage embarquée, ou l'interface du démon.
+/// La page de démarrage embarquée, l'interface du démon, ou un relais de l'onglet navigateur.
+/// `on_navigation` voit aussi les navigations des CADRES : les pages de l'onglet navigateur
+/// passent par des relais du démon, sur `127.0.0.1` à un autre port ; les renvoyer au
+/// navigateur du système laissait le cadre blanc et ouvrait l'adresse du relais dehors.
 fn is_internal(url: &Url, origin: &Url) -> bool {
     match url.scheme() {
-        "tauri" | "about" => true,
-        "http" => url.host_str() == origin.host_str() && url.port_or_known_default() == origin.port_or_known_default(),
+        "tauri" | "about" | "data" | "blob" => true,
+        "http" => {
+            (url.host_str() == origin.host_str() && url.port_or_known_default() == origin.port_or_known_default())
+                || url.host_str() == Some("127.0.0.1")
+        }
         _ => false,
     }
 }

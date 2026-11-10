@@ -15,7 +15,10 @@ export const replyActions = () => `<div class="reply-actions">
  * `ctx()` rend { repoId, title, selfSession, selfChat } de la conversation affichée.
  */
 export function bindReplies(container, rawOf, ctx) {
-  container.addEventListener("click", async (e) => {
+  // Un seul écouteur par conteneur : le fil se redessine dans le même conteneur (onglets,
+  // « plus anciens »), et chaque liaison en ajoutait un, d'où une modale ouverte N fois.
+  if (container._replies) container.removeEventListener("click", container._replies);
+  container._replies = async (e) => {
     const btn = e.target.closest(".reply-actions button");
     if (!btn) return;
     const reply = btn.closest(".reply");
@@ -24,9 +27,11 @@ export function bindReplies(container, rawOf, ctx) {
     if (btn.hasAttribute("data-copy")) {
       try { await navigator.clipboard.writeText(raw); toast("Réponse copiée."); } catch { toast("Copie impossible.", true); }
     } else {
+      if (document.querySelector("dialog.tf-dlg")) return; // déjà ouverte
       transferDialog(raw, await ctx());
     }
-  });
+  };
+  container.addEventListener("click", container._replies);
 }
 
 /** Le brouillon d'une conversation (même clé que la barre de saisie). */
@@ -41,7 +46,9 @@ async function transferDialog(raw, ctx) {
   const convs = await convsFor(repo.id);
   const live = store.chats.filter((c) => c.repo_id === repo.id && c.status !== "exited");
 
+  if (document.querySelector("dialog.tf-dlg")) return;
   const dlg = document.createElement("dialog");
+  dlg.className = "tf-dlg";
   dlg.innerHTML = `<form class="dlg" method="dialog">
     <h2>Transférer la réponse</h2>
     <label>Worktree<select class="field" id="tf-wt">${groups.map((g, i) => `<option value="${i}">${esc(label(g))}</option>`).join("")}<option value="__new">Nouveau worktree…</option></select></label>

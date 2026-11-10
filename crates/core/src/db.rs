@@ -193,6 +193,12 @@ CREATE TABLE IF NOT EXISTS prompts (
     used    INTEGER NOT NULL DEFAULT 0
 );
 
+-- Conversations archivées (propre à DRIFTy, non dérivé : survit aux ré-analyses).
+CREATE TABLE IF NOT EXISTS archived (
+    session_id TEXT PRIMARY KEY,
+    at         INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL

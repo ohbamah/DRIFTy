@@ -2,7 +2,8 @@
 // worktrees → conversations, et jauges d'usage en pied. Persistante : seule la
 // zone principale change d'une page à l'autre.
 import { api, esc, ago, icon, logo, badges, toast, $, $$ } from "./lib.js";
-import { store, subscribe, ensureLoaded, convsFor } from "./store.js";
+import { store, subscribe, ensureLoaded, convsFor, reload } from "./store.js";
+import { openMenu } from "./select.js";
 import { newChatDialog } from "./views/chat.js";
 import { editProject } from "./views/project.js";
 
@@ -48,15 +49,66 @@ function convRow(c, chat, sel) {
   const on = (chat && chat.id === sel.c) || c.id === sel.s;
   const href = chat ? `#/conversations?c=${chat.id}` : `#/conversations?s=${c.id}`;
   const model = modelShort(chat?.model || c.model);
-  return `<a class="sb-conv${on ? " on" : ""}" href="${href}" title="${esc(c.title || c.first_prompt || "")}">
+  // Conversation (transcript) et/ou discussion en direct : de quoi la renommer ou l'archiver.
+  const sid = c.listed === false ? chat?.session_id || "" : c.id;
+  return `<a class="sb-conv${on ? " on" : ""}" href="${href}" title="${esc(c.title || c.first_prompt || "")}" data-sid="${esc(sid)}" data-chat="${esc(chat?.id || "")}">
     ${STATUS[liveStatus(chat)]}<span class="sb-title">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>
     <span class="sb-meta">${esc(model)} ${age(chat ? Date.now() : c.last_ts)}</span>
+    <button class="sb-dots" type="button" data-dots title="Renommer, archiver" aria-label="Actions">${icon("dots")}</button>
   </a>`;
 }
 
 /** Discussions lancées dans l'app qui ne sont pas encore dans la liste (nouvelles). */
 function newChatRow(chat, sel) {
-  return convRow({ id: chat.session_id || chat.id, title: chat.name, last_ts: chat.created }, chat, sel);
+  return convRow({ id: chat.session_id || chat.id, title: chat.name, last_ts: chat.created, listed: false }, chat, sel);
+}
+
+// ------------------------------------------------------------ renommer, archiver
+function renameRow(row) {
+  const span = row.querySelector(".sb-title");
+  const old = span.textContent;
+  const input = document.createElement("input");
+  input.className = "sb-rename";
+  input.value = old;
+  input.maxLength = 120;
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const title = input.value.trim();
+    input.replaceWith(span);
+    if (!save || !title || title === old) return;
+    span.textContent = title;
+    try {
+      const { chat, sid } = row.dataset;
+      await api(chat ? `/api/chats/${chat}/title` : `/api/sessions/${sid}/title`, { method: "PUT", json: { title } });
+      await reload();
+    } catch (err) { span.textContent = old; toast(err.message, true); }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); });
+}
+
+async function archiveRow(row) {
+  const { chat, sid } = row.dataset;
+  if (!sid) return toast("Cette discussion n'a pas encore de conversation à archiver : attends sa première réponse.", true);
+  const live = chat && store.chats.find((c) => c.id === chat && c.status !== "exited");
+  if (live && !confirm("Cette discussion tourne encore : l'arrêter et l'archiver ?")) return;
+  try {
+    if (live) await api(`/api/chats/${chat}`, { method: "DELETE" });
+    await api(`/api/sessions/${sid}/archive`, { method: "POST" });
+    const viewing = new URLSearchParams(location.hash.split("?")[1] || "");
+    if (viewing.get("s") === sid || (chat && viewing.get("c") === chat)) location.hash = "#/conversations";
+    toast("Conversation archivée : elle reste dans les réglages du projet.");
+    await reload();
+  } catch (err) { toast(err.message, true); }
 }
 
 // ------------------------------------------------------------ arbre
@@ -203,6 +255,14 @@ export async function mountSidebar(el) {
   });
   $("#sb-toggle", el).addEventListener("click", () => document.body.classList.toggle("sb-hidden"));
   el.addEventListener("click", (e) => {
+    const dots = e.target.closest("[data-dots]");
+    if (dots) {
+      e.preventDefault();
+      e.stopPropagation();
+      const row = dots.closest(".sb-conv");
+      openMenu(dots, [{ value: "rename", label: "Renommer" }, { value: "archive", label: "Archiver" }], null, (v) => (v === "rename" ? renameRow(row) : archiveRow(row)));
+      return;
+    }
     const newBtn = e.target.closest("[data-new]");
     const editBtn = e.target.closest("[data-edit]");
     const more = e.target.closest("[data-more]");

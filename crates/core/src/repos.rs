@@ -245,6 +245,7 @@ pub fn conversations(conn: &Connection, repo_id: i64, worktree: Option<&str>, re
          LEFT JOIN p ON p.session_id = s.id
          LEFT JOIN session_waste w ON w.session_id = s.id
          WHERE c.repo_id = ?1 AND (?2 IS NULL OR c.worktree = ?2) AND (?3 IS NULL OR c.rel = ?3)
+           AND s.id NOT IN (SELECT session_id FROM archived)
          GROUP BY s.id ORDER BY {order} LIMIT 1000"
     );
     let mut st = conn.prepare(&sql)?;

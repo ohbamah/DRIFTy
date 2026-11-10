@@ -81,7 +81,7 @@ fn checks(rollup: &Value) -> Vec<Value> {
 
 const THREAD_QUERY: &str = "query($owner:String!,$repo:String!,$n:Int!){
   viewer { login avatarUrl(size:64) }
-  repository(owner:$owner,name:$repo){ pullRequest(number:$n){
+  repository(owner:$owner,name:$repo){ viewerPermission pullRequest(number:$n){
     author { login avatarUrl(size:64) }
     headRefName commits { totalCount } viewerCanMergeAsAdmin
     reviewRequests(first:30){ nodes { requestedReviewer {
@@ -140,7 +140,9 @@ fn timeline(dir: &str, n: i64) -> Result<Value> {
         }
     }
     Ok(json!({"items": items, "reviewers": reviewers, "viewer": person(&v["data"]["viewer"]), "author": person(&pr["author"]),
-              "head": pr["headRefName"], "commits": pr["commits"]["totalCount"], "can_admin": pr["viewerCanMergeAsAdmin"] == true}))
+              "head": pr["headRefName"], "commits": pr["commits"]["totalCount"], // Contournement : protection de branche (viewerCanMergeAsAdmin) ou administrateur du dépôt, que les
+              // rulesets laissent passer (GitHub montre alors sa case « bypass rules » ; il tranche à la fusion).
+              "can_admin": pr["viewerCanMergeAsAdmin"] == true || v["data"]["repository"]["viewerPermission"] == "ADMIN"}))
 }
 
 /// Ce qui autorise la fusion, lu en UN point (l'affichage et l'action le partagent) :

@@ -1,6 +1,7 @@
-//! Liste des modèles disponibles, demandée à Claude Code lui-même : sa réponse
-//! d'initialisation (protocole stream-json) contient `models` pour le compte
-//! courant. Aucun modèle n'est appelé (zéro token). Mise en cache 10 min.
+//! Modèles et commandes `/` disponibles, demandés à Claude Code lui-même : sa réponse
+//! d'initialisation (protocole stream-json) contient `models` pour le compte courant et
+//! `commands` pour le dossier (commandes et skills du projet compris). Aucun modèle
+//! n'est appelé (zéro token). Mise en cache 10 min, par compte et par dossier.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -19,22 +20,24 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub async fn get(&self, config_dir: Option<&str>) -> Result<Value> {
-        let key = config_dir.unwrap_or("").to_string();
+    /// `{models, commands}` ; `cwd` absent = dossier neutre (modèles seuls utiles).
+    pub async fn get(&self, config_dir: Option<&str>, cwd: Option<&str>) -> Result<Value> {
+        let key = format!("{}|{}", config_dir.unwrap_or(""), cwd.unwrap_or(""));
         if let Some((at, v)) = self.by_dir.lock().unwrap().get(&key) {
             if at.elapsed() < TTL {
                 return Ok(v.clone());
             }
         }
-        let v = fetch(config_dir).await?;
+        let v = fetch(config_dir, cwd).await?;
         self.by_dir.lock().unwrap().insert(key, (Instant::now(), v.clone()));
         Ok(v)
     }
 }
 
-async fn fetch(config_dir: Option<&str>) -> Result<Value> {
-    let dir = claudius_core::home().join(".claudius").join("improve");
-    std::fs::create_dir_all(&dir)?;
+async fn fetch(config_dir: Option<&str>, cwd: Option<&str>) -> Result<Value> {
+    let neutral = claudius_core::home().join(".claudius").join("improve");
+    std::fs::create_dir_all(&neutral)?;
+    let dir = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir()).unwrap_or(neutral);
     let mut cmd = Command::new("claude");
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence"])
         .current_dir(&dir)
@@ -56,18 +59,18 @@ async fn fetch(config_dir: Option<&str>) -> Result<Value> {
         while let Some(line) = lines.next_line().await? {
             let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
             if ev["type"] == "control_response" && ev.pointer("/response/request_id") == Some(&json!("models")) {
-                return Ok::<Value, anyhow::Error>(ev.pointer("/response/response/models").cloned().unwrap_or(json!([])));
+                return Ok::<Value, anyhow::Error>(ev.pointer("/response/response").cloned().unwrap_or(json!({})));
             }
         }
         anyhow::bail!("The model list cannot be read because Claude Code closed without answering.")
     };
-    let models = tokio::time::timeout(Duration::from_secs(30), read)
+    let init = tokio::time::timeout(Duration::from_secs(30), read)
         .await
         .map_err(|_| anyhow::anyhow!("The model list cannot be read because Claude Code did not answer within 30 s."))??;
     let _ = child.kill().await;
     // On ne garde que ce que l'interface affiche.
-    Ok(Value::Array(
-        models
+    let models = Value::Array(
+        init["models"]
             .as_array()
             .into_iter()
             .flatten()
@@ -77,5 +80,6 @@ async fn fetch(config_dir: Option<&str>) -> Result<Value> {
                 })
             })
             .collect(),
-    ))
+    );
+    Ok(json!({"models": models, "commands": init["commands"].clone()}))
 }

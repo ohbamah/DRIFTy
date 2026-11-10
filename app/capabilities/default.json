@@ -1,14 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Fenêtre principale : la page de démarrage locale et l'interface servie par claudiusd (boucle locale seulement).",
+  "description": "Fenêtre principale : la page de démarrage locale et l'interface servie par claudiusd sur son port (pas les relais de l'onglet navigateur, qui affichent des sites tiers).",
   "windows": ["main"],
   "remote": {
-    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+    "urls": ["http://127.0.0.1:4317", "http://localhost:4317"]
   },
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "notification:default"
+    "notification:default",
+    "opener:default"
   ]
 }

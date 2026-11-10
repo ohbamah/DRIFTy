@@ -1,6 +1,6 @@
 // Réglages d'un projet : nom, logo (emoji ou image), couleur, compte, masquage.
-import { api, esc, icon, logo, toast, PROJECT_COLORS, $, $$ } from "../lib.js";
-import { store, setRepos } from "../store.js";
+import { api, esc, ago, icon, logo, toast, PROJECT_COLORS, $, $$ } from "../lib.js";
+import { store, setRepos, reload } from "../store.js";
 import { soundList, soundLabel, loadNotifyCfg, play } from "../notify.js";
 
 // ------------------------------------------------------------ personnalisation d'un projet
@@ -42,6 +42,7 @@ export function editProject(repo, hint = "") {
     </div>
     <label class="check"><input type="checkbox" id="hidden"${repo.hidden ? " checked" : ""}> Masquer</label>
     <div class="muted small" title="${esc(repo.root)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(repo.root)}</div>
+    <details class="arch"><summary>${icon("chevron")}Conversations archivées</summary><div class="arch-list"></div></details>
     <div class="foot"><button class="btn" value="cancel" formnovalidate>Annuler</button><button class="btn primary" value="save" id="save">Enregistrer</button></div>
   </form>`;
   document.body.append(dlg);
@@ -80,6 +81,27 @@ export function editProject(repo, hint = "") {
     setupSaved = cfg.configured ? cfg.script || "" : "";
     setupTa.value = setupSaved;
   }).catch(() => {});
+  // Conversations archivées : chargées à l'ouverture de la section (repliée par défaut).
+  const arch = $(".arch", dlg), archList = $(".arch-list", dlg);
+  const drawArch = async () => {
+    archList.innerHTML = `<div class="muted small">Chargement…</div>`;
+    const list = await api(`/api/repos/${repo.id}/archived`).catch(() => []);
+    archList.innerHTML = list.length ? list.map((c) => `<div class="arch-row" data-sid="${esc(c.id)}">
+        <span class="arch-t" title="${esc(c.title || c.first_prompt || "")}">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>
+        <span class="muted small">${c.worktree ? esc(c.worktree) + " · " : ""}${ago(c.last_ts)}</span>
+        <button class="btn small" type="button" data-open>Ouvrir</button><button class="btn small" type="button" data-unarchive>Désarchiver</button>
+      </div>`).join("") : `<div class="muted small">Aucune conversation archivée.</div>`;
+    archList.querySelectorAll("[data-open]").forEach((b) => b.addEventListener("click", () => {
+      location.hash = `#/conversations?s=${b.closest(".arch-row").dataset.sid}`;
+      dlg.close();
+    }));
+    archList.querySelectorAll("[data-unarchive]").forEach((b) => b.addEventListener("click", async () => {
+      const r = b.closest(".arch-row");
+      try { await api(`/api/sessions/${r.dataset.sid}/archive`, { method: "DELETE" }); r.remove(); reload(); if (!archList.querySelector(".arch-row")) drawArch(); }
+      catch (err) { toast(err.message, true); }
+    }));
+  };
+  arch.addEventListener("toggle", () => { if (arch.open) drawArch(); });
   const preview = () => ($("#preview", dlg).innerHTML = logo({ ...repo, icon: iconValue, color, name: $("#name", dlg).value || repo.name }, "lg"));
   preview();
   $("#name", dlg).addEventListener("input", preview);

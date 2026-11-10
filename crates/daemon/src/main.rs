@@ -7,6 +7,9 @@ mod commands;
 mod evaluate;
 mod github;
 mod setup;
+mod side;
+mod term;
+mod web;
 mod sounds;
 mod improve;
 mod launch;
@@ -47,6 +50,8 @@ struct App {
     syncing: Arc<AtomicBool>,
     last: Arc<Mutex<Option<(i64, claudius_core::SyncReport)>>>,
     origin: Arc<String>,
+    terms: term::Terms,
+    web: web::Proxies,
 }
 
 struct ApiError(anyhow::Error);
@@ -268,6 +273,9 @@ struct NewChat {
     name: Option<String>,
     /// `worktree` | `project` ; par défaut, le réglage du projet.
     mode: Option<String>,
+    /// Avec `session_id` : reprise en branche (nouvelle conversation, l'originale intacte).
+    #[serde(default)]
+    fork: bool,
     #[serde(default = "yes")]
     bypass: bool,
     text: Option<String>,
@@ -314,7 +322,11 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
         };
         return Ok(chat::LaunchSpec {
             repo_id: repo_id.unwrap_or(0),
-            name: title.map(|t| t.chars().take(80).collect()).unwrap_or_else(|| sid.chars().take(8).collect()),
+            name: {
+                let n: String = r.title.clone().filter(|t| !t.trim().is_empty())
+                    .or(title).map(|t| t.chars().take(80).collect()).unwrap_or_else(|| sid.chars().take(8).collect());
+                if r.fork && r.title.is_none() { format!("↳ {n}") } else { n }
+            },
             config_dir: repos::account_dir(c, slot.as_deref())?,
             slot,
             cwd,
@@ -332,6 +344,7 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
             env: resume_env,
             new_worktree: false,
             setup_job: None,
+            fork: r.fork,
             model: r.model.clone().filter(|m| !m.trim().is_empty()),
         });
     }
@@ -397,6 +410,7 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
         env: new_env,
         new_worktree: mode == "worktree",
         setup_job: None,
+        fork: false,
         model: r.model.clone().filter(|m| !m.trim().is_empty()),
     })
 }
@@ -405,7 +419,7 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
 fn resume_spec(c: &Connection, sid: &str, model: Option<String>) -> Result<chat::LaunchSpec> {
     let r = NewChat {
         images: vec![], model, title: None, worktree: None, slot: None, repo_id: None,
-        session_id: Some(sid.to_string()), name: None, mode: None, bypass: true, text: None,
+        session_id: Some(sid.to_string()), name: None, mode: None, bypass: true, text: None, fork: false,
     };
     chat_spec(c, &r)
 }
@@ -544,12 +558,13 @@ struct RunReq {
     command: String,
 }
 
-async fn run_start(State(app): State<App>, Json(r): Json<RunReq>) -> ApiResult {
-    let (dir, _) = review_dir(&app, &ReviewTarget { chat: r.chat.clone(), session: r.session.clone(), message: None }).await?;
+/// Variables d'un dossier de conversation (port de son worktree) : un seul point, pour les
+/// commandes, le terminal intégré et l'onglet navigateur.
+async fn worktree_env(app: &App, chat: Option<&str>, dir: &str) -> std::result::Result<(Vec<(String, String)>, Option<u16>), ApiError> {
     // Projet et worktree du dossier : celui du chat, sinon celui connu par l'analyse.
-    let chat_ctx = r.chat.as_deref().and_then(|id| app.chats.get(id).ok()).map(|c| (c.repo_id, c.worktree.clone().unwrap_or_default()));
-    let d = dir.clone();
-    let port = with_conn(&app, move |c| {
+    let chat_ctx = chat.and_then(|id| app.chats.get(id).ok()).map(|c| (c.repo_id, c.worktree.clone().unwrap_or_default()));
+    let d = dir.to_string();
+    let port = with_conn(app, move |c| {
         let ctx = chat_ctx.or_else(|| {
             c.query_row("SELECT repo_id, worktree FROM cwd_map WHERE cwd = ?1", rusqlite::params![d], |x| Ok((x.get::<_, i64>(0)?, x.get::<_, String>(1)?))).ok()
         });
@@ -562,7 +577,13 @@ async fn run_start(State(app): State<App>, Json(r): Json<RunReq>) -> ApiResult {
     .0
     .as_u64()
     .map(|p| p as u16);
-    let id = app.jobs.start(&dir, &r.command, &ports::env(port))?;
+    Ok((ports::env(port), port))
+}
+
+async fn run_start(State(app): State<App>, Json(r): Json<RunReq>) -> ApiResult {
+    let (dir, _) = review_dir(&app, &ReviewTarget { chat: r.chat.clone(), session: r.session.clone(), message: None }).await?;
+    let (env, port) = worktree_env(&app, r.chat.as_deref(), &dir).await?;
+    let id = app.jobs.start(&dir, &r.command, &env)?;
     Ok(Json(json!({"id": id, "port": port, "hardcoded": port.and_then(|_| ports::hardcoded(&dir))})))
 }
 
@@ -654,6 +675,79 @@ async fn prompts_used(State(app): State<App>, Path(id): Path<i64>) -> ApiResult 
     .await
 }
 
+// ------------------------------------------------------------ renommer, archiver
+
+#[derive(Deserialize)]
+struct TitleReq {
+    title: String,
+}
+
+async fn conv_rename(State(app): State<App>, Path(id): Path<String>, Json(t): Json<TitleReq>) -> ApiResult {
+    let sid = id.clone();
+    let title = t.title.trim().to_string();
+    let v = with_conn(&app, move |c| {
+        claudius_core::convs::rename(c, &sid, &title)?;
+        Ok(json!({"ok": true, "title": title}))
+    })
+    .await?;
+    // Une discussion en direct sur cette conversation prend le même nom.
+    for chat in app.chats.list() {
+        if chat["session_id"] == id.as_str() {
+            if let Ok(ch) = app.chats.get(chat["id"].as_str().unwrap_or("")) {
+                ch.rename(t.title.trim());
+            }
+        }
+    }
+    Ok(v)
+}
+
+/// Discussion en direct : son nom, et celui de sa conversation si elle en a déjà une.
+async fn chat_rename(State(app): State<App>, Path(id): Path<String>, Json(t): Json<TitleReq>) -> ApiResult {
+    let chat = app.chats.get(&id)?;
+    let title = t.title.trim().to_string();
+    if title.is_empty() || title.chars().count() > 120 || title.contains(['\n', '\r']) {
+        return Err(anyhow::anyhow!("The conversation cannot be renamed because its name must be 1 to 120 characters on one line.").into());
+    }
+    if let Some(sid) = chat.session_id() {
+        let known = with_conn(&app, {
+            let sid = sid.clone();
+            move |c| Ok(json!(c.query_row("SELECT 1 FROM sessions WHERE id = ?1", rusqlite::params![sid], |_| Ok(())).is_ok()))
+        })
+        .await?
+        .0;
+        if known == true {
+            let t2 = title.clone();
+            let _ = with_conn(&app, move |c| {
+                claudius_core::convs::rename(c, &sid, &t2)?;
+                Ok(json!({}))
+            })
+            .await?;
+        }
+    }
+    chat.rename(&title);
+    Ok(Json(json!({"ok": true, "title": title})))
+}
+
+async fn conv_archive(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    with_conn(&app, move |c| {
+        claudius_core::convs::archive(c, &id, now_ms())?;
+        Ok(json!({"ok": true}))
+    })
+    .await
+}
+
+async fn conv_unarchive(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    with_conn(&app, move |c| {
+        claudius_core::convs::unarchive(c, &id)?;
+        Ok(json!({"ok": true}))
+    })
+    .await
+}
+
+async fn repo_archived(State(app): State<App>, Path(id): Path<i64>) -> ApiResult {
+    with_conn(&app, move |c| claudius_core::convs::archived(c, id)).await
+}
+
 async fn chat_list(State(app): State<App>) -> Json<Value> {
     Json(Value::Array(app.chats.list()))
 }
@@ -712,6 +806,11 @@ async fn chat_stop(State(app): State<App>, Path(id): Path<String>) -> ApiResult 
 
 async fn chat_close(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     app.chats.remove(&id).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn chat_send_now(State(app): State<App>, Path((id, qid)): Path<(String, String)>) -> ApiResult {
+    app.chats.get(&id)?.send_now(&qid).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -880,7 +979,7 @@ async fn models(State(app): State<App>, Query(q): Query<ModelsQ>) -> ApiResult {
         repos::account_dir(&c, slot.as_deref())
     })
     .await??;
-    Ok(Json(app.models.get(dir.as_deref()).await?))
+    Ok(Json(app.models.get(dir.as_deref(), None).await?["models"].clone()))
 }
 
 async fn rules_list(State(app): State<App>, Path(id): Path<i64>) -> ApiResult {
@@ -1046,6 +1145,8 @@ async fn main() -> Result<()> {
         syncing: Arc::new(AtomicBool::new(false)),
         last: Arc::new(Mutex::new(None)),
         origin: Arc::new(format!("http://{addr}")),
+        terms: term::Terms::default(),
+        web: web::Proxies::default(),
     };
 
     // Messages programmés : envoyés à l'heure par le démon.
@@ -1092,6 +1193,17 @@ async fn main() -> Result<()> {
         .route("/api/chats/{id}/stop", post(chat_stop))
         .route("/api/chats/{id}/model", post(chat_set_model))
         .route("/api/models", get(models))
+        .route("/api/commands", get(side::commands))
+        .route("/api/btw", post(side::btw))
+        .route("/api/sessions/{id}/title", put(conv_rename))
+        .route("/api/chats/{id}/title", put(chat_rename))
+        .route("/api/sessions/{id}/archive", post(conv_archive).delete(conv_unarchive))
+        .route("/api/repos/{id}/archived", get(repo_archived))
+        .route("/api/term", post(term::open))
+        .route("/api/term/{id}", axum::routing::delete(term::close))
+        .route("/api/term/{id}/ws", get(term::ws))
+        .route("/api/web", post(web::open))
+        .route("/api/web/default", get(web::default_url))
         .route("/api/search", get(search))
         .route("/api/prompts", get(prompts_list).post(prompts_create))
         .route("/api/prompts/{id}", axum::routing::delete(prompts_delete))
@@ -1115,6 +1227,7 @@ async fn main() -> Result<()> {
         .route("/api/scheduled/{id}", axum::routing::delete(scheduled_cancel))
         .route("/api/chats/{id}/seen", post(chat_seen))
         .route("/api/chats/{id}/queue/{qid}", axum::routing::delete(chat_unqueue))
+        .route("/api/chats/{id}/queue/{qid}/now", post(chat_send_now))
         .route("/api/accounts", get(accounts).put(set_account))
         .layer(middleware::from_fn_with_state(app.clone(), same_origin))
         .with_state(app);

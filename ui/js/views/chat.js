@@ -2,6 +2,9 @@
 import { api, esc, usd, tok, icon, slotChip, toast, loader, imageStrip, diffStat, modelLabel, $, $$ } from "../lib.js";
 import { md } from "../md.js";
 import { attachImprove } from "../improve.js";
+import { attachSlash } from "../slash.js";
+import { openBtw, forkMessage } from "../btw.js";
+import { token, withElements, userText } from "../elements.js";
 import { replyActions, bindReplies } from "../reply.js";
 
 let source = null; // flux SSE du chat affiché (un seul à la fois)
@@ -108,7 +111,7 @@ export function newChatDialog(repo, onStarted) {
 
 // ------------------------------------------------------------ composeur
 // `draftKey` : le texte non envoyé est gardé (par discussion) et retrouvé au retour.
-export function composer(placeholder, onSend, { draftKey = "", onStop = null, onRecall = null, improve = null, schedule = null, prompts = null } = {}) {
+export function composer(placeholder, onSend, { draftKey = "", onStop = null, onRecall = null, improve = null, schedule = null, prompts = null, slash = null, btw = null } = {}) {
   const el = document.createElement("div");
   el.className = "composer";
   el.innerHTML = `<div class="attach-row" hidden></div>
@@ -122,22 +125,39 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
       ${schedule ? `<button class="icon-btn sched-btn" type="button" title="Programmer l'envoi" aria-label="Programmer l'envoi">${icon("clock")}</button>` : ""}
       ${prompts ? `<button class="icon-btn foot-btn" type="button" data-psave title="Sauvegarder le prompt" aria-label="Sauvegarder le prompt">${icon("bookmark")}</button>
         <button class="icon-btn foot-btn" type="button" data-papply title="Appliquer un prompt" aria-label="Appliquer un prompt">${icon("list")}</button>` : ""}
+      ${btw ? `<button class="btw-btn" type="button" data-btw title="Question annexe (/btw) : sans modifier la conversation ni interrompre l'agent">BTW</button>` : ""}
     </div>`;
   const ta = $("textarea", el);
+  // Commandes `/` : branchées AVANT l'écoute d'Entrée, qui les complète au lieu d'envoyer.
+  if (slash) attachSlash(ta, slash, el);
   // Images jointes (collées, déposées ou choisies), envoyées avec le message.
-  let images = [];
+  // Pièces jointes : images et éléments de page. Chacune a son repère dans le texte
+  // (`[Image #1]`, `[Élément #1]`), inséré au curseur ; la retirer retire son repère.
+  let images = [], elements = [], imgN = 0, elN = 0;
   const row = $(".attach-row", el);
+  const insertAt = (text) => {
+    const a = ta.selectionStart ?? ta.value.length, b = ta.selectionEnd ?? a;
+    const before = ta.value.slice(0, a), after = ta.value.slice(b);
+    const pre = before && !/\s$/.test(before) ? " " : "", post = after && !/^\s/.test(after) ? " " : "";
+    ta.value = before + pre + text + post + after;
+    const at = (before + pre + text + post).length;
+    ta.setSelectionRange(at, at);
+    save(); grow();
+  };
+  const dropToken = (tok) => { ta.value = ta.value.replace(tok, "").replace(/ {2,}/g, " "); save(); grow(); };
   const drawRow = () => {
-    row.hidden = !images.length;
-    row.innerHTML = images.map((im, i) => `<div class="att"><img src="data:${im.media_type};base64,${im.data}" alt=""><button type="button" data-rm="${i}" aria-label="Retirer">${icon("close")}</button></div>`).join("");
-    $$("[data-rm]", row).forEach((b) => b.addEventListener("click", () => { images.splice(+b.dataset.rm, 1); drawRow(); }));
+    row.hidden = !images.length && !elements.length;
+    row.innerHTML = images.map((im, i) => `<div class="att" title="${esc(`Image #${im.n}`)}"><img src="data:${im.media_type};base64,${im.data}" alt=""><span class="att-n">#${im.n}</span><button type="button" data-rm="${i}" aria-label="Retirer">${icon("close")}</button></div>`).join("")
+      + elements.map((e, i) => `<div class="att-el" title="${esc(e.info.selector)}"><span class="el-tag">Élément #${e.n}</span><code>${esc(e.info.short)}</code>${e.info.text ? `<span class="att-el-t">${esc(e.info.text.slice(0, 40))}</span>` : ""}<button type="button" data-rm-el="${i}" aria-label="Retirer">${icon("close")}</button></div>`).join("");
+    $$("[data-rm]", row).forEach((b) => b.addEventListener("click", () => { const [im] = images.splice(+b.dataset.rm, 1); dropToken(`[Image #${im.n}]`); drawRow(); }));
+    $$("[data-rm-el]", row).forEach((b) => b.addEventListener("click", () => { const [e] = elements.splice(+b.dataset.rmEl, 1); dropToken(token(e.n)); drawRow(); }));
   };
   const addFiles = (files) => {
     for (const f of files) {
       if (!/^image\/(png|jpeg|gif|webp)$/.test(f.type)) { toast("Seules les images PNG, JPEG, GIF ou WebP peuvent être jointes.", true); continue; }
       if (f.size > 5 * 1024 * 1024) { toast("Image trop lourde (5 Mo au plus).", true); continue; }
       const rd = new FileReader();
-      rd.onload = () => { images.push({ media_type: f.type, data: String(rd.result).split(",")[1] }); drawRow(); };
+      rd.onload = () => { const n = ++imgN; images.push({ media_type: f.type, data: String(rd.result).split(",")[1], n }); insertAt(`[Image #${n}]`); drawRow(); };
       rd.readAsDataURL(f);
     }
   };
@@ -166,9 +186,12 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
   };
   const send = async () => {
     const t = ta.value.trim();
-    if (!t && !images.length) return;
+    if (!t && !images.length && !elements.length) return;
     ta.disabled = true;
-    try { await onSend(t, images); ta.value = ""; images = []; drawRow(); save(); grow(); } catch (e) { toast(e.message, true); }
+    try {
+      await onSend(withElements(t, elements), images.map(({ media_type, data }) => ({ media_type, data })));
+      ta.value = ""; images = []; elements = []; imgN = elN = 0; drawRow(); save(); grow();
+    } catch (e) { toast(e.message, true); }
     ta.disabled = false;
     ta.focus();
   };
@@ -206,6 +229,15 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
       save(); grow(); ta.focus();
     }));
   }
+  if (btw) $("[data-btw]", el).addEventListener("click", () => openBtw(el, {
+    ...btw,
+    insert: (text) => { const at = ta.selectionStart ?? ta.value.length; ta.value = ta.value.slice(0, at) + text + ta.value.slice(at); save(); grow(); ta.focus(); },
+  }));
+  /** Joint un élément de page (onglet navigateur) : pastille + repère au curseur. */
+  el.attachElement = (info) => { const n = ++elN; elements.push({ n, info }); insertAt(token(n)); drawRow(); };
+  el.addText = (text) => insertAt(text);
+  // Hauteur recalculée quand la saisie redevient visible (texte inséré pendant qu'elle était cachée).
+  new ResizeObserver(() => { if (el.offsetParent) grow(); }).observe(el);
   el.fill = (text) => { ta.value = text; save(); grow(); ta.focus(); ta.setSelectionRange(text.length, text.length); };
   requestAnimationFrame(grow);
   return el;
@@ -446,6 +478,17 @@ export async function renderLive(box, chatId, onMeta) {
     draftKey: chatId,
     improve: () => ({ chat_id: chatId }),
     prompts: { repoId: () => info.repo_id },
+    slash: () => ({ chat: chatId }),
+    btw: {
+      target: () => ({ chat: chatId }),
+      send: (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).catch((e) => toast(e.message, true)),
+      fork: async (q, a) => {
+        const sid = (await api(`/api/chats/${chatId}`)).session_id;
+        if (!sid) throw new Error("La discussion n'a pas encore de conversation à brancher : attends sa première réponse.");
+        const c = await api("/api/chats", { method: "POST", json: { session_id: sid, fork: true, text: forkMessage(q, a), bypass: info.bypass } });
+        location.hash = `#/conversations?c=${c.id}`;
+      },
+    },
     schedule: { slot: info.slot, create: async (text, at) => { await api("/api/scheduled", { method: "POST", json: { at_ms: at, chat_id: chatId, text } }); refreshSched(); } },
     onStop: () => api(`/api/chats/${chatId}/stop`, { method: "POST" }).catch((e) => toast(e.message, true)),
     onRecall: () => { const last = [...queued.keys()].pop(); if (last) recall(last); },
@@ -475,7 +518,7 @@ export async function renderLive(box, chatId, onMeta) {
         if (e.role === "user") {
           flush();
           const urls = (e.images || []).map((k) => `/api/sessions/${encodeURIComponent(info.resume_of)}/image?k=${encodeURIComponent(k)}`);
-          html += `<div class="msg-user-wrap">${imageStrip(urls)}${e.text ? `<div class="msg-user">${esc(e.text)}</div>` : ""}</div>`;
+          html += `<div class="msg-user-wrap">${imageStrip(urls)}${e.text ? `<div class="msg-user">${userText(e.text)}</div>` : ""}</div>`;
           continue;
         }
         if (!group) { group = { id: "p" + replyRaw.size, html: "" }; replyRaw.set(group.id, ""); }
@@ -616,11 +659,15 @@ export async function renderLive(box, chatId, onMeta) {
         lastUserTs = ev.ts || Date.now(); // au rejeu, la durée du tour part du vrai envoi
         curReply = null;
         const urls = (ev.images || []).map((n) => `/api/chats/${chatId}/image/${n}`);
-        add(`<div class="msg-user-wrap">${imageStrip(urls)}${ev.text ? `<div class="msg-user">${esc(ev.text)}</div>` : ""}</div>`);
+        add(`<div class="msg-user-wrap">${imageStrip(urls)}${ev.text ? `<div class="msg-user">${userText(ev.text)}</div>` : ""}</div>`);
       }
       else if (ev.kind === "queued") {
-        const el = add(`<div class="msg-user queued" data-q="${esc(ev.id)}"><div>${esc(ev.text)}${ev.image_count ? ` <span class="muted">(+${ev.image_count} image${ev.image_count > 1 ? "s" : ""})</span>` : ""}</div><div class="q-foot"><span>En attente</span><button class="link" type="button">Modifier</button></div></div>`);
-        el.querySelector("button").addEventListener("click", () => recall(ev.id));
+        const el = add(`<div class="msg-user queued" data-q="${esc(ev.id)}"><div>${userText(ev.text)}${ev.image_count ? ` <span class="muted">(+${ev.image_count} image${ev.image_count > 1 ? "s" : ""})</span>` : ""}</div><div class="q-foot"><span>En attente</span><button class="link" type="button" data-edit>Modifier</button><button class="link" type="button" data-now title="Claude le lit dès sa prochaine étape, sans interrompre son travail">Envoyer maintenant</button></div></div>`);
+        el.querySelector("[data-edit]").addEventListener("click", () => recall(ev.id));
+        el.querySelector("[data-now]").addEventListener("click", (e) => {
+          e.currentTarget.disabled = true;
+          api(`/api/chats/${chatId}/queue/${encodeURIComponent(ev.id)}/now`, { method: "POST" }).catch((err) => { toast(err.message, true); e.currentTarget.disabled = false; });
+        });
         queued.set(ev.id, el);
       } else if (ev.kind === "unqueued") {
         queued.get(ev.id)?.remove();

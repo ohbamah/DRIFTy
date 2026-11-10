@@ -10,6 +10,9 @@ import { openReview } from "../review.js";
 import { openGithub } from "../github.js";
 import { openJob } from "../run.js";
 import { openRun } from "../run.js";
+import { forkMessage } from "../btw.js";
+import { mountTabs } from "../tabs.js";
+import { userText } from "../elements.js";
 
 // L'URL porte la sélection : #/conversations?s=<conversation> | c=<discussion en direct> &t=<onglet>
 function nav(patch) {
@@ -61,12 +64,16 @@ async function renderChatDetail(chatId) {
         <button class="btn" id="chat-close" title="Arrêter et fermer la discussion">Fermer</button>
       </div>
       <div class="meta">${slotChip(info.slot)}${info.worktree ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(info.worktree)}</span>` : ""}${info.bypass ? `<span class="chip waste">Bypass</span>` : `<span class="chip">Autorisations demandées</span>`}<span id="chat-cost"></span><span id="chat-bar"></span></div>
-      <div style="height:14px"></div>
+      <div class="tabs" role="tablist"><button class="tab on" data-tab="conv" role="tab">Conversation</button></div>
     </div>
     ${info.setup_job ? `<div class="setup-strip" id="setup-strip"></div>` : ""}
     <div class="detail-body" id="detail-body"></div>`;
   $("[data-back]", box).addEventListener("click", () => document.body.classList.remove("sb-hidden"));
   if (info.setup_job) followSetup($("#setup-strip", box), info.setup_job, info.name);
+  slide(box);
+  mountTabs(box, $(".tabs", box), "c:" + chatId, { chat: chatId }, {
+    send: (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).catch((e) => toast(e.message, true)),
+  });
   const sendToChat = (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).catch((e) => toast(e.message, true));
   $("#chat-gh", box).addEventListener("click", () => openGithub({ chat: chatId }, info.name, { toClaude: sendToChat }));
   $("#chat-review", box).addEventListener("click", () => openReview({ chat: chatId }, info.name));
@@ -155,6 +162,7 @@ async function renderDetail(sid, tab) {
     </div>
     <div class="detail-body" id="detail-body"></div>`;
   slide(box);
+  mountTabs(box, $(".tabs", box), "s:" + sid, { session: sid }, {});
   // Barre de conversation, même quand aucun agent ne tourne : totaux de la dernière analyse.
   (async () => {
     const [info] = await Promise.all([api(`/api/sessions/${sid}`), loadBarCfg()]);
@@ -166,7 +174,7 @@ async function renderDetail(sid, tab) {
     };
     draw();
   })().catch(() => {});
-  $$(".tab", box).forEach((b) => b.addEventListener("click", () => {
+  $$(".tab[data-tab]", box).forEach((b) => b.addEventListener("click", () => {
     if (b.classList.contains("on")) return;
     moveTo(b);
     nav({ t: b.dataset.tab === "conv" ? null : b.dataset.tab });
@@ -207,6 +215,14 @@ async function renderBody(body, sid, tab) {
       }, {
         draftKey: "s:" + sid, onStop: () => {}, improve: () => ({ session_id: sid }), // stop affiché, grisé : rien ne tourne ici
         prompts: { repoId: () => repoOfConv },
+        slash: () => ({ session: sid }),
+        btw: {
+          target: () => ({ session: sid }),
+          fork: async (q, a) => {
+            const c = await api("/api/chats", { method: "POST", json: { session_id: sid, fork: true, text: forkMessage(q, a), bypass: true, model: model || null } });
+            nav({ c: c.id, s: null, t: null });
+          },
+        },
         schedule: { slot: null, create: async (text, at) => { await api("/api/scheduled", { method: "POST", json: { at_ms: at, session_id: sid, text, model: model || null } }); refreshSched(); } },
       });
       body.after(comp);
@@ -266,7 +282,7 @@ async function renderThread(body, sid) {
 function block(b, sid) {
   if (b.role === "user") {
     const urls = (b.images || []).map((k) => `/api/sessions/${encodeURIComponent(sid)}/image?k=${encodeURIComponent(k)}`);
-    return `<div class="msg-user-wrap">${imageStrip(urls)}${b.text ? `<div class="msg-user">${esc(b.text)}</div>` : ""}</div>`;
+    return `<div class="msg-user-wrap">${imageStrip(urls)}${b.text ? `<div class="msg-user">${userText(b.text)}</div>` : ""}</div>`;
   }
   if (b.role === "assistant") return `<div class="msg-ai">${md(b.text)}</div>`;
   if (b.role === "event") return `<div class="event">${esc(b.text)}</div>`;

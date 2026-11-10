@@ -8,6 +8,7 @@ import { slide } from "./slide.js";
 import { mountSidebar } from "./sidebar.js";
 import { reload } from "./store.js";
 import { startNotifications } from "./notify.js";
+import { autoSelects } from "./select.js";
 
 const view = $("#view");
 $("#sb-reopen").innerHTML = icon("sidebar");
@@ -66,3 +67,4 @@ document.addEventListener("click", async (e) => {
 
 mountSidebar($("#sidebar")).then(route);
 startNotifications();
+autoSelects(document.body); // menus déroulants maison partout

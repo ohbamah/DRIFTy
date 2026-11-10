@@ -3,6 +3,7 @@
 // fusion (relectures, checks, conflits, bouton de fusion), commentaire. Les actions
 // simples lancent git / gh ; les complexes deviennent un prompt confié à Claude.
 import { api, esc, icon, toast, loader, ago, $, $$ } from "./lib.js";
+import { openMenu } from "./select.js";
 
 // ------------------------------------------------------------ icônes (traits, 24 × 24)
 const P = {
@@ -233,10 +234,10 @@ export async function openGithub(target, title, { toClaude } = {}) {
     return `<div class="ghp-mfoot col">${head}
       ${can ? `<div class="ghp-mopts">
         ${g.level === "confirm" ? `<label class="ghp-check-l"><input type="checkbox" data-force> Je confirme fusionner malgré la CI</label>` : ""}
-        ${g.level === "rules" && pr.can_admin ? `<label class="ghp-check-l danger"><input type="checkbox" data-admin> Contourner les règles et fusionner maintenant (administrateur)</label>` : ""}
+        ${g.level === "rules" && pr.can_admin ? `<label class="ghp-check-l danger"><input type="checkbox" data-admin> Fusionner sans attendre que les conditions soient remplies (contourner les règles)</label>` : ""}
         <label class="ghp-check-l"><input type="checkbox" data-auto> Fusion automatique dès que les conditions sont remplies</label>
       </div>` : ""}
-      <div class="ghp-row"><div class="ghp-split"><button class="ghp-btn primary" data-merge disabled>Squash and merge</button><label class="ghp-btn primary ghp-caret" title="Méthode de fusion">${icon("chevron")}<select data-method><option value="squash">Squash and merge</option><option value="merge">Create a merge commit</option><option value="rebase">Rebase and merge</option></select></label></div>
+      <div class="ghp-row"><div class="ghp-split"><button class="ghp-btn primary" data-merge disabled>Squash and merge</button><button type="button" class="ghp-btn primary ghp-caret" data-caret title="Méthode de fusion">${icon("chevron")}</button><select data-method data-native hidden><option value="squash">Squash and merge</option><option value="merge">Create a merge commit</option><option value="rebase">Rebase and merge</option></select></div>
         ${g.level === "conflict" ? `<span class="ghp-muted small">Résous les conflits pour pouvoir fusionner.</span>` : ""}</div>
     </div>`;
   };
@@ -362,6 +363,10 @@ export async function openGithub(target, title, { toClaude } = {}) {
     $("[data-admin]", body)?.addEventListener("change", (e) => { if (e.target.checked) $("[data-auto]", body).checked = false; sync(); });
     $("[data-force]", body)?.addEventListener("change", sync);
     method?.addEventListener("change", sync);
+    $("[data-caret]", body)?.addEventListener("click", (e) => openMenu(e.currentTarget, [...method.options].map((o) => ({ value: o.value, label: o.textContent })), method.value, (v) => {
+      method.value = v;
+      method.dispatchEvent(new Event("change"));
+    }));
     sync();
     mergeBtn?.addEventListener("click", (e) => {
       const auto = box("[data-auto]"), admin = box("[data-admin]"), force = box("[data-force]"), label = method.selectedOptions[0].textContent;

@@ -15,7 +15,7 @@ rayon = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync", "process", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 
 [profile.release]
