@@ -64,13 +64,20 @@ async function renderChatDetail(chatId) {
         <button class="btn" id="chat-close" title="Arrêter et fermer la discussion">Fermer</button>
       </div>
       <div class="meta">${slotChip(info.slot)}${info.worktree ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(info.worktree)}</span>` : ""}${info.bypass ? `<span class="chip waste">Bypass</span>` : `<span class="chip">Autorisations demandées</span>`}<span id="chat-cost"></span><span id="chat-bar"></span></div>
-      <div class="tabs" role="tablist"><button class="tab on" data-tab="conv" role="tab">Conversation</button></div>
+      <div class="tabs" role="tablist"><button class="tab on" data-tab="conv" role="tab">Conversation</button><button class="tab" data-tab="analyse" role="tab" id="chat-analyse">Analyse</button></div>
     </div>
     ${info.setup_job ? `<div class="setup-strip" id="setup-strip"></div>` : ""}
     <div class="detail-body" id="detail-body"></div>`;
   $("[data-back]", box).addEventListener("click", () => document.body.classList.remove("sb-hidden"));
   if (info.setup_job) followSetup($("#setup-strip", box), info.setup_job, info.name);
   slide(box);
+  // « Analyse » : celle de la conversation (après « Analyser ») ; « Conversation » y ramène au direct.
+  $("#chat-analyse", box).addEventListener("click", async (e) => {
+    if ($("#detail.x-on")) return; // retour depuis un onglet ajouté : géré par la barre d'onglets
+    const sid = (await api(`/api/chats/${chatId}`).catch(() => ({}))).session_id;
+    if (!sid) { e.currentTarget.classList.remove("on"); return toast("La discussion n'a pas encore de conversation à analyser : attends sa première réponse.", true); }
+    nav({ s: sid, c: null, t: "analyse" });
+  });
   mountTabs(box, $(".tabs", box), "c:" + chatId, { chat: chatId }, {
     send: (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).catch((e) => toast(e.message, true)),
   });
@@ -99,7 +106,7 @@ async function renderChatDetail(chatId) {
 
 // Conversation passée : un prompt va en brouillon dans sa saisie (rien ne tourne pour le recevoir).
 function toDraft(sid, text) {
-  try { localStorage.setItem("claudius.draft.s:" + sid, text); } catch {}
+  try { localStorage.setItem("drifty.draft.s:" + sid, text); } catch {}
   const ta = document.querySelector(".composer textarea");
   if (ta) { ta.value = text; ta.dispatchEvent(new Event("input", { bubbles: true })); ta.focus(); }
 }

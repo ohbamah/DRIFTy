@@ -54,7 +54,7 @@ async fn ask_past(sid: &str, cwd: &str, config_dir: Option<&str>, question: &str
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let default_dir = claudius_core::home().join(".claude");
+    let default_dir = drifty_core::home().join(".claude");
     if let Some(d) = config_dir.filter(|d| std::path::Path::new(d) != default_dir) {
         cmd.env("CLAUDE_CONFIG_DIR", d);
     }
@@ -99,15 +99,34 @@ pub async fn btw(State(app): State<App>, Json(r): Json<BtwReq>) -> ApiResult {
     let config_dir = with_conn(&app, move |c| Ok(json!(repos::account_dir(c, slot.as_deref())?))).await?.0;
     let (text, i, o, cost) = ask_past(&sid, &cwd, config_dir.as_str(), &question, &history).await?;
     let _ = with_conn(&app, move |c| {
-        claudius_core::ledger::record_spend(c, "btw", None, i, o, cost)?;
+        drifty_core::ledger::record_spend(c, "btw", None, i, o, cost)?;
         Ok(json!({}))
     })
     .await?;
     Ok(Json(json!({"response": text})))
 }
 
-pub async fn commands(State(app): State<App>, Query(t): Query<ReviewTarget>) -> ApiResult {
-    let (cwd, slot) = review_dir(&app, &t).await?;
+#[derive(Deserialize)]
+pub struct CommandsQ {
+    chat: Option<String>,
+    session: Option<String>,
+    /// Discussion pas encore lancée : le dossier et le compte du projet.
+    repo: Option<i64>,
+}
+
+pub async fn commands(State(app): State<App>, Query(q): Query<CommandsQ>) -> ApiResult {
+    let (cwd, slot) = match q.repo {
+        Some(id) => {
+            let v = with_conn(&app, move |c| {
+                let (root, slot): (String, Option<String>) = c.query_row("SELECT root, slot FROM repos WHERE id = ?1", rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(json!([root, slot.or(drifty_core::db::default_slot(c)?)]))
+            })
+            .await?
+            .0;
+            (v[0].as_str().unwrap_or("").to_string(), v[1].as_str().map(str::to_string))
+        }
+        None => review_dir(&app, &ReviewTarget { chat: q.chat, session: q.session, message: None }).await?,
+    };
     let config_dir = with_conn(&app, move |c| Ok(json!(repos::account_dir(c, slot.as_deref())?))).await?.0;
     let info = app.models.get(config_dir.as_str(), Some(&cwd)).await?;
     let list: Vec<Value> = info["commands"]

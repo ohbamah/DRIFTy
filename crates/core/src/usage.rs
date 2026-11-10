@@ -2,8 +2,8 @@
 //!
 //! Source officielle : le JSON que Claude Code envoie à son script de
 //! statusline (`rate_limits.five_hour` / `rate_limits.seven_day`). Le relais
-//! `claudiusd statusline --slot <compte>` en écrit le dernier relevé dans
-//! `~/.claudius/usage/<compte>.json`. Rien n'est demandé à un service.
+//! `driftyd statusline --slot <compte>` en écrit le dernier relevé dans
+//! `~/.drifty/usage/<compte>.json`. Rien n'est demandé à un service.
 
 use crate::db;
 use anyhow::{Context, Result};
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub fn dir() -> PathBuf {
-    crate::db_path().parent().map(Path::to_path_buf).unwrap_or_else(|| crate::home().join(".claudius")).join("usage")
+    crate::db_path().parent().map(Path::to_path_buf).unwrap_or_else(|| crate::home().join(".drifty")).join("usage")
 }
 
 fn now_ms() -> i64 {
@@ -164,7 +164,7 @@ pub fn install_relay(conn: &Connection, slot: &str, exe: &Path) -> Result<String
         cmd += &format!(" -- {}", q(old));
     }
     if path.exists() {
-        std::fs::copy(&path, path.with_extension("json.claudius-backup"))?;
+        std::fs::copy(&path, path.with_extension("json.drifty-backup"))?;
     }
     let obj = v.as_object_mut().ok_or_else(|| anyhow::anyhow!("The relay cannot be installed because `{}` is not a JSON object.", path.display()))?;
     let mut sl = obj.get("statusLine").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
@@ -173,6 +173,29 @@ pub fn install_relay(conn: &Connection, slot: &str, exe: &Path) -> Result<String
     obj.insert("statusLine".into(), sl);
     std::fs::write(&path, serde_json::to_string_pretty(&v)? + "\n")?;
     Ok(cmd)
+}
+
+/// Ancien nom (Claudius) : une statusline qui appelle `…/claudiusd statusline` appelle
+/// désormais le binaire courant (`exe`). Sauvegarde du réglage avant réécriture.
+pub fn migrate_relay_commands(conn: &Connection, exe: &Path) -> Result<usize> {
+    let mut n = 0;
+    for a in db::accounts(conn)? {
+        let path = settings_path(&a.config_dir);
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(mut v) = serde_json::from_str::<Value>(&text) else { continue };
+        let Some(cmd) = v.pointer("/statusLine/command").and_then(Value::as_str).map(str::to_string) else { continue };
+        let Some(at) = cmd.find("claudiusd' statusline").or_else(|| cmd.find("claudiusd statusline")) else { continue };
+        // Le chemin de l'ancien binaire : du début de la commande jusqu'à `claudiusd` (guillemets compris).
+        let quoted = cmd.starts_with('\'');
+        let end = at + "claudiusd".len() + usize::from(quoted);
+        let q = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+        let new = format!("{}{}", q(&exe.to_string_lossy()), &cmd[end..]);
+        std::fs::copy(&path, path.with_extension("json.drifty-backup"))?;
+        v["statusLine"]["command"] = json!(new);
+        std::fs::write(&path, serde_json::to_string_pretty(&v)? + "\n")?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// Débranche le relais : remet la commande d'origine.

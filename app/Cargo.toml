@@ -1,15 +1,15 @@
 [package]
-name = "claudius-app"
+name = "drifty-app"
 version = "0.1.0"
 edition = "2021"
-description = "DRIFTy : application macOS (coquille Tauri autour de claudiusd)"
+description = "DRIFTy : application macOS (coquille Tauri autour de driftyd)"
 
 # Projet indépendant du workspace racine : il ne recompile pas le démon et
 # le workspace racine (cargo test) ne le voit pas.
 [workspace]
 
 [[bin]]
-name = "claudius-app"
+name = "drifty-app"
 path = "src/main.rs"
 
 [build-dependencies]

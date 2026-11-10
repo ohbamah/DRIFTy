@@ -16,8 +16,8 @@ fi
 
 # 1. Le démon, embarqué dans le bundle (externalBin attend le suffixe de la cible).
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-cargo build --release -q -p claudius-daemon
-cp target/release/claudiusd "app/binaries/claudiusd-$TRIPLE"
+cargo build --release -q -p drifty-daemon
+cp target/release/driftyd "app/binaries/driftyd-$TRIPLE"
 
 # 2. L'app.
 (cd app && cargo tauri build --bundles app)

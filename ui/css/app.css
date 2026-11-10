@@ -1360,3 +1360,20 @@ details[open] > summary .ghp-show::after { content: "Masquer"; }
 .arch-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 260px; overflow-y: auto; }
 .arch-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; background: var(--raised); }
 .arch-t { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-msg { position: relative; }
+.nc-msg .slash-menu { max-height: 240px; }
+
+/* barre latérale : rien de sélectionnable (sauf les champs), projets qui s'ouvrent en douceur */
+#sidebar { -webkit-user-select: none; user-select: none; }
+#sidebar input, #sidebar textarea { -webkit-user-select: text; user-select: text; }
+.sb-proj-body { overflow: hidden; }
+.sb-chev svg { transition: transform 0.2s cubic-bezier(.2,.7,.2,1); }
+
+/* aide des raccourcis */
+.keys { display: flex; flex-direction: column; gap: 6px; }
+.key-row { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.key-row kbd { min-width: 96px; padding: 3px 8px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; background: var(--raised); font: 600 12px var(--mono); color: var(--ink); text-align: center; }
+.sb-wt-row { position: relative; }
+.sb-wt-row .sb-dots { margin-left: auto; }
+.sb-wt-row:hover .sb-dots, .sb-wt-row .sb-dots.open { display: inline-grid; }
+.arch-t svg { width: 13px; height: 13px; vertical-align: -2px; color: var(--muted); }

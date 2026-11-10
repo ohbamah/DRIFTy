@@ -10,10 +10,10 @@ import { editProject } from "./views/project.js";
 const PER_GROUP = 5;
 const ui = { query: "", expanded: new Set(), open: new Set() };
 try {
-  const saved = JSON.parse(localStorage.getItem("claudius.tree") || "{}");
+  const saved = JSON.parse(localStorage.getItem("drifty.tree") || "{}");
   (saved.expanded || []).forEach((id) => ui.expanded.add(id));
 } catch {}
-const saveTree = () => { try { localStorage.setItem("claudius.tree", JSON.stringify({ expanded: [...ui.expanded] })); } catch {} };
+const saveTree = () => { try { localStorage.setItem("drifty.tree", JSON.stringify({ expanded: [...ui.expanded] })); } catch {} };
 
 /** `claude-opus-5-5` → `opus-5.5` (comme dans Orca). */
 export function modelShort(id) {
@@ -61,6 +61,31 @@ function convRow(c, chat, sel) {
 /** Discussions lancées dans l'app qui ne sont pas encore dans la liste (nouvelles). */
 function newChatRow(chat, sel) {
   return convRow({ id: chat.session_id || chat.id, title: chat.name, last_ts: chat.created, listed: false }, chat, sel);
+}
+
+// ------------------------------------------------------------ ouvrir / fermer un projet (animé)
+const EASE = "cubic-bezier(.2,.7,.2,1)";
+const calm = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+async function toggleProject(row) {
+  const id = +row.dataset.repo;
+  const proj = row.closest(".sb-proj");
+  if (ui.expanded.has(id)) {
+    ui.expanded.delete(id);
+    saveTree();
+    proj.classList.remove("open"); // le chevron tourne pendant que la liste se replie
+    const b = proj.querySelector(".sb-proj-body");
+    if (b && !calm()) {
+      await b.animate([{ height: b.offsetHeight + "px", opacity: 1 }, { height: "0px", opacity: 0 }], { duration: 180, easing: EASE }).finished.catch(() => {});
+      b.style.height = "0px";
+    }
+    return drawTree();
+  }
+  ui.expanded.add(id);
+  saveTree();
+  proj.classList.add("open");
+  await drawTree();
+  const b = $(`.sb-proj-row[data-repo="${id}"]`)?.closest(".sb-proj")?.querySelector(".sb-proj-body");
+  if (b && !calm()) b.animate([{ height: "0px", opacity: 0 }, { height: b.scrollHeight + "px", opacity: 1 }], { duration: 220, easing: EASE });
 }
 
 // ------------------------------------------------------------ renommer, archiver
@@ -111,6 +136,23 @@ async function archiveRow(row) {
   } catch (err) { toast(err.message, true); }
 }
 
+async function archiveWorktree({ repo, wt, n }) {
+  const live = store.chats.filter((c) => c.repo_id === +repo && c.worktree === wt && c.status !== "exited").length;
+  if (!confirm(`Archiver le worktree « ${wt} » ?\n\n• ses ${n} conversation(s) passent dans les réglages du projet ;\n• son dossier est retiré, sa branche est gardée (restaurable) ;${live ? `\n• ${live} discussion(s) en cours s'arrêtent.` : ""}`)) return;
+  const go = (keep_folder) => api(`/api/repos/${repo}/worktrees/archive`, { method: "POST", json: { worktree: wt, keep_folder } });
+  try {
+    try { await go(false); }
+    catch (err) {
+      if (!/would be lost/.test(err.message)) throw err;
+      const files = (/(\d+) file/.exec(err.message) || [, "?"])[1];
+      if (!confirm(`« ${wt} » a ${files} fichier(s) non commité(s). Archiver quand même en GARDANT son dossier (rien n'est supprimé) ?`)) return;
+      await go(true);
+    }
+    toast(`Worktree « ${wt} » archivé.`);
+    await reload();
+  } catch (err) { toast(err.message, true); }
+}
+
 // ------------------------------------------------------------ arbre
 async function projectHtml(repo, sel) {
   const open = ui.expanded.has(repo.id);
@@ -136,7 +178,8 @@ async function projectHtml(repo, sel) {
       const branch = inGroup.find((c) => c.branch)?.branch || "";
       const name = g.worktree || (g.rel ? g.rel : repo.root.split("/").pop());
       return `<div class="sb-wt">
-        <div class="sb-wt-row">${working ? STATUS.working : `<span class="st st-wt"></span>`}<span class="sb-wt-name">${esc(g.rel && g.worktree ? `${g.worktree}/${g.rel}` : name)}</span>${!g.worktree && !g.rel ? `<span class="sb-tag">primary</span>` : ""}</div>
+        <div class="sb-wt-row">${working ? STATUS.working : `<span class="st st-wt"></span>`}<span class="sb-wt-name">${esc(g.rel && g.worktree ? `${g.worktree}/${g.rel}` : name)}</span>${!g.worktree && !g.rel ? `<span class="sb-tag">primary</span>` : ""}
+          ${g.worktree && !g.rel ? `<button class="sb-dots" type="button" data-wt-dots data-repo="${repo.id}" data-wt="${esc(g.worktree)}" data-n="${inGroup.length}" title="Archiver le worktree" aria-label="Actions du worktree">${icon("dots")}</button>` : ""}</div>
         ${branch ? `<div class="sb-branch">${esc(branch)}</div>` : ""}
         ${rows}${more}
       </div>`;
@@ -152,7 +195,7 @@ async function projectHtml(repo, sel) {
         <button class="sb-act" data-edit="${repo.id}" title="Réglages du projet">${icon("gear")}</button>
       </span>
     </div>
-    ${body}
+    ${open ? `<div class="sb-proj-body">${body}</div>` : ""}
   </div>`;
 }
 
@@ -255,6 +298,13 @@ export async function mountSidebar(el) {
   });
   $("#sb-toggle", el).addEventListener("click", () => document.body.classList.toggle("sb-hidden"));
   el.addEventListener("click", (e) => {
+    const wtDots = e.target.closest("[data-wt-dots]");
+    if (wtDots) {
+      e.preventDefault();
+      e.stopPropagation();
+      openMenu(wtDots, [{ value: "archive", label: "Archiver le worktree" }], null, () => archiveWorktree(wtDots.dataset));
+      return;
+    }
     const dots = e.target.closest("[data-dots]");
     if (dots) {
       e.preventDefault();
@@ -279,10 +329,7 @@ export async function mountSidebar(el) {
       ui.open.has(k) ? ui.open.delete(k) : ui.open.add(k);
       drawTree();
     } else if (row) {
-      const id = +row.dataset.repo;
-      ui.expanded.has(id) ? ui.expanded.delete(id) : ui.expanded.add(id);
-      saveTree();
-      drawTree();
+      toggleProject(row);
     }
   });
   subscribe(drawTree);

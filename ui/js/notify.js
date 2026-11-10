@@ -127,7 +127,7 @@ function watchChats() {
 }
 
 // Limites : une seule notification par fenêtre (clé = compte + moment du reset), gardée entre deux ouvertures.
-const seenKey = "claudius.notified";
+const seenKey = "drifty.notified";
 const seen = () => { try { return new Set(JSON.parse(localStorage.getItem(seenKey) || "[]")); } catch { return new Set(); } };
 function markSeen(k) {
   const s = seen();

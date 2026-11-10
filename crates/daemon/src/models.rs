@@ -35,7 +35,7 @@ impl Cache {
 }
 
 async fn fetch(config_dir: Option<&str>, cwd: Option<&str>) -> Result<Value> {
-    let neutral = claudius_core::home().join(".claudius").join("improve");
+    let neutral = drifty_core::home().join(".drifty").join("improve");
     std::fs::create_dir_all(&neutral)?;
     let dir = cwd.map(std::path::PathBuf::from).filter(|p| p.is_dir()).unwrap_or(neutral);
     let mut cmd = Command::new("claude");
@@ -45,7 +45,7 @@ async fn fetch(config_dir: Option<&str>, cwd: Option<&str>) -> Result<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let default_dir = claudius_core::home().join(".claude");
+    let default_dir = drifty_core::home().join(".claude");
     if let Some(d) = config_dir.filter(|d| std::path::Path::new(d) != default_dir) {
         cmd.env("CLAUDE_CONFIG_DIR", d);
     }

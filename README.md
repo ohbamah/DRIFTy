@@ -8,12 +8,12 @@ optimisable, ce que ça rapporterait).
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo run --release -p claudius-daemon        # http://127.0.0.1:4317
+cargo run --release -p drifty-daemon        # http://127.0.0.1:4317
 ```
 
-- `CLAUDIUS_DB` : chemin de la base (défaut `~/.claudius/claudius.db`).
-- `CLAUDIUS_ADDR` : adresse d'écoute (défaut `127.0.0.1:4317`).
-- `claudiusd --sync-only` : synchronise puis sort (affiche le rapport JSON).
+- `DRIFTY_DB` : chemin de la base (défaut `~/.drifty/drifty.db`).
+- `DRIFTY_ADDR` : adresse d'écoute (défaut `127.0.0.1:4317`).
+- `driftyd --sync-only` : synchronise puis sort (affiche le rapport JSON).
 - `./run.sh` : compile si besoin, démarre et ouvre l'interface.
 
 **Rien ne se synchronise tout seul** : ni au lancement, ni en tâche de fond.
@@ -30,19 +30,19 @@ Seul le bouton « Synchroniser » (ou `--sync-only`) relit les transcripts.
 Prérequis : `cargo install tauri-cli --version '^2' --locked`. Le projet Tauri
 vit dans `app/`, hors du workspace (le `cargo test` racine ne le voit pas).
 
-- Au lancement, l'app réutilise le démon qui répond sur `CLAUDIUS_ADDR`
-  (défaut `127.0.0.1:4317`) ; sinon elle lance le `claudiusd` du bundle, avec
+- Au lancement, l'app réutilise le démon qui répond sur `DRIFTY_ADDR`
+  (défaut `127.0.0.1:4317`) ; sinon elle lance le `driftyd` du bundle, avec
   le `PATH` du shell de connexion, et l'arrête en quittant (seulement
-  celui-là). Journal : `~/Library/Logs/DRIFTy/claudiusd.log`.
+  celui-là). Journal : `~/Library/Logs/DRIFTy/driftyd.log`.
 - Notifications natives par le plugin Tauri ; liens externes dans le
   navigateur du système ; taille et position de la fenêtre mémorisées.
 - Essai sans toucher au démon courant :
-  `CLAUDIUS_ADDR=127.0.0.1:4398 CLAUDIUS_DB=/tmp/essai.db app/target/release/bundle/macos/DRIFTy.app/Contents/MacOS/DRIFTy`.
+  `DRIFTY_ADDR=127.0.0.1:4398 DRIFTY_DB=/tmp/essai.db app/target/release/bundle/macos/DRIFTy.app/Contents/MacOS/DRIFTy`.
 
 ## Architecture
 
 ```
-ui/ (HTML/CSS/JS sans build)  ⇄  HTTP/JSON  ⇄  claudiusd (Rust)  ⇄  SQLite
+ui/ (HTML/CSS/JS sans build)  ⇄  HTTP/JSON  ⇄  driftyd (Rust)  ⇄  SQLite
                                                       ↑
                        transcripts ~/.claude/projects/**/*.jsonl (perso, pro)
 ```
@@ -58,7 +58,7 @@ Arch-C un jour) sans la toucher.
 | `crates/core/src/db.rs` | Schéma SQLite, comptes, seul point d'écriture |
 | `crates/core/src/query.rs` | Vue d'ensemble, listes de sessions |
 | `crates/core/src/digest.rs` | Évaluation étage 1 : causes de lenteur, gains |
-| `crates/daemon` | `claudiusd` : API + ingestion toutes les 60 s + UI embarquée |
+| `crates/daemon` | `driftyd` : API + ingestion toutes les 60 s + UI embarquée |
 
 ### API
 
@@ -84,10 +84,10 @@ Au premier lancement, `~/.claude` devient le compte perso.
 Source officielle : Claude Code envoie à son script de statusline un objet
 `rate_limits` (`five_hour` / `seven_day` : `used_percentage`, `resets_at`).
 Le bouton « Activer » d’une carte d’usage (le relais) remplace la commande de
-statusline du compte par `claudiusd statusline --slot <compte> -- <commande
+statusline du compte par `driftyd statusline --slot <compte> -- <commande
 d'origine>` : le relais écrit le dernier relevé dans
-`~/.claudius/usage/<compte>.json`, puis rejoue la statusline d'origine avec la
-même entrée. `settings.json` est sauvegardé en `settings.json.claudius-backup` ;
+`~/.drifty/usage/<compte>.json`, puis rejoue la statusline d'origine avec la
+même entrée. `settings.json` est sauvegardé en `settings.json.drifty-backup` ;
 `DELETE /api/accounts/{slot}/relay` remet la commande d'origine. Aucun appel à
 un service, aucun jeton lu. Les jauges sont un instantané de la dernière
 réponse de Claude dans ce compte.

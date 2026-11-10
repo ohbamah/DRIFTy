@@ -29,7 +29,7 @@ pub async fn run(text: &str, project: Option<&str>, config_dir: Option<&str>) ->
     // Le nom du projet n'est PAS transmis : le modèle le recopiait dans le prompt (mesuré),
     // ce qui ajoute une information que l'utilisateur n'a pas écrite.
     let _ = project;
-    let model = std::env::var("CLAUDIUS_IMPROVE_MODEL").unwrap_or_else(|_| "sonnet".into());
+    let model = std::env::var("DRIFTY_IMPROVE_MODEL").unwrap_or_else(|_| "sonnet".into());
     oneshot(SYSTEM, text, config_dir, &model, "The prompt cannot be improved").await
 }
 
@@ -37,7 +37,7 @@ pub async fn run(text: &str, project: Option<&str>, config_dir: Option<&str>) ->
 /// aucune session écrite. Sert à tout ce que DRIFTy demande pour lui-même.
 pub async fn oneshot(system: &str, prompt: &str, config_dir: Option<&str>, model: &str, what: &str) -> Result<Improved> {
     let start = std::time::Instant::now();
-    let dir = claudius_core::home().join(".claudius").join("improve");
+    let dir = drifty_core::home().join(".drifty").join("improve");
     std::fs::create_dir_all(&dir)?;
     let mut cmd = Command::new("claude");
     cmd.args(["-p", "--output-format", "json", "--no-session-persistence", "--safe-mode", "--strict-mcp-config", "--tools", "", "--model", model])
@@ -47,7 +47,7 @@ pub async fn oneshot(system: &str, prompt: &str, config_dir: Option<&str>, model
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let default_dir = claudius_core::home().join(".claude");
+    let default_dir = drifty_core::home().join(".claude");
     if let Some(d) = config_dir.filter(|d| std::path::Path::new(d) != default_dir) {
         cmd.env("CLAUDE_CONFIG_DIR", d);
     }

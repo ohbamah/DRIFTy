@@ -37,12 +37,13 @@ export function editProject(repo, hint = "") {
     <label>Son « autorisation demandée »<span class="snd-row"><select class="field" id="snd-permission"></select><button class="icon-btn" type="button" data-play="snd-permission">▶</button></span></label>
     <div class="setup-field">
       <div class="setup-head"><b>Mise en place d'un nouveau worktree</b><span style="flex:1"></span><button class="btn small" type="button" id="setup-ai">${icon("sparkle")}Proposer par l'IA</button></div>
-      <textarea class="field area mono" id="setup" rows="6" wrap="off" spellcheck="false" placeholder="# Vide : aucun script. Lancé par bash -e dans chaque nouveau worktree.&#10;# cp &quot;$CLAUDIUS_ROOT_PATH/.env&quot; .env&#10;# bundle install"></textarea>
-      <div class="muted small" id="setup-why">Variables : <code>$CLAUDIUS_ROOT_PATH</code> (dossier principal), <code>$CLAUDIUS_WORKSPACE_NAME</code>, <code>$PORT</code>. Les scripts Conductor marchent tels quels.</div>
+      <textarea class="field area mono" id="setup" rows="6" wrap="off" spellcheck="false" placeholder="# Vide : aucun script. Lancé par bash -e dans chaque nouveau worktree.&#10;# cp &quot;$DRIFTY_ROOT_PATH/.env&quot; .env&#10;# bundle install"></textarea>
+      <div class="muted small" id="setup-why">Variables : <code>$DRIFTY_ROOT_PATH</code> (dossier principal), <code>$DRIFTY_WORKSPACE_NAME</code>, <code>$PORT</code>. Les scripts Conductor marchent tels quels.</div>
     </div>
     <label class="check"><input type="checkbox" id="hidden"${repo.hidden ? " checked" : ""}> Masquer</label>
     <div class="muted small" title="${esc(repo.root)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(repo.root)}</div>
-    <details class="arch"><summary>${icon("chevron")}Conversations archivées</summary><div class="arch-list"></div></details>
+    <details class="arch arch-wt"><summary>${icon("chevron")}Worktrees archivés</summary><div class="arch-list"></div></details>
+    <details class="arch arch-cv"><summary>${icon("chevron")}Conversations archivées</summary><div class="arch-list"></div></details>
     <div class="foot"><button class="btn" value="cancel" formnovalidate>Annuler</button><button class="btn primary" value="save" id="save">Enregistrer</button></div>
   </form>`;
   document.body.append(dlg);
@@ -82,7 +83,24 @@ export function editProject(repo, hint = "") {
     setupTa.value = setupSaved;
   }).catch(() => {});
   // Conversations archivées : chargées à l'ouverture de la section (repliée par défaut).
-  const arch = $(".arch", dlg), archList = $(".arch-list", dlg);
+  const arch = $(".arch-cv", dlg), archList = $(".arch-list", arch);
+  // Worktrees archivés : restaurables (dossier remis sur sa branche, conversations de retour).
+  const wtBox = $(".arch-wt", dlg), wtList = $(".arch-list", wtBox);
+  const drawWt = async () => {
+    wtList.innerHTML = `<div class="muted small">Chargement…</div>`;
+    const list = await api(`/api/repos/${repo.id}/worktrees/archived`).catch(() => []);
+    wtList.innerHTML = list.length ? list.map((w) => `<div class="arch-row" data-wt="${esc(w.worktree)}">
+        <span class="arch-t">${icon("branch")} ${esc(w.worktree)}</span>
+        <span class="muted small">${w.branch ? esc(w.branch) + " · " : ""}${w.conversations} conv. · ${w.removed ? "dossier retiré" : "dossier gardé"} · ${ago(w.archived_at)}</span>
+        <button class="btn small" type="button" data-restore>Restaurer</button>
+      </div>`).join("") : `<div class="muted small">Aucun worktree archivé.</div>`;
+    wtList.querySelectorAll("[data-restore]").forEach((b) => b.addEventListener("click", async () => {
+      b.disabled = true;
+      try { await api(`/api/repos/${repo.id}/worktrees/restore`, { method: "POST", json: { worktree: b.closest(".arch-row").dataset.wt } }); toast("Worktree restauré."); reload(); drawWt(); if (arch.open) drawArch(); }
+      catch (err) { toast(err.message, true); b.disabled = false; }
+    }));
+  };
+  wtBox.addEventListener("toggle", () => { if (wtBox.open) drawWt(); });
   const drawArch = async () => {
     archList.innerHTML = `<div class="muted small">Chargement…</div>`;
     const list = await api(`/api/repos/${repo.id}/archived`).catch(() => []);

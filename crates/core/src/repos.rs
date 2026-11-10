@@ -204,6 +204,7 @@ pub fn list(conn: &Connection) -> Result<Value> {
         "SELECT c.worktree, c.rel, COUNT(s.id), MAX(s.last_ts)
          FROM cwd_map c JOIN sessions s ON s.cwd = c.cwd
          WHERE c.repo_id = ?1 AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+           AND s.id NOT IN (SELECT session_id FROM archived)
          GROUP BY c.worktree, c.rel ORDER BY c.worktree <> '', c.worktree, c.rel",
     )?;
     let default = crate::db::default_slot(conn)?;

@@ -1,7 +1,7 @@
 //! Ouvre un terminal sur un projet ou une conversation, avec le bon compte.
 
 use anyhow::Result;
-use claudius_core::repos::LaunchTarget;
+use drifty_core::repos::LaunchTarget;
 use std::process::Command;
 
 fn shell_quote(s: &str) -> String {
@@ -14,7 +14,7 @@ fn applescript_string(s: &str) -> String {
 
 /// La commande shell exécutée dans le terminal.
 pub fn command(t: &LaunchTarget) -> String {
-    let default_dir = claudius_core::home().join(".claude");
+    let default_dir = drifty_core::home().join(".claude");
     let mut cmd = format!("cd {} && ", shell_quote(&t.dir));
     // `~/.claude` est le dossier par défaut de Claude : ne pas le forcer, la
     // variable déplace aussi le fichier d'identification.

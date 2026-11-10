@@ -46,7 +46,7 @@ pub fn refresh(conn: &Connection) -> Result<usize> {
 pub fn record_spend(conn: &Connection, kind: &str, session_id: Option<&str>, input: i64, output: i64, cost_usd: Option<f64>) -> Result<()> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     conn.execute(
-        "INSERT INTO claudius_spend(ts, kind, session_id, input_tokens, output_tokens, cost_usd) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO drifty_spend(ts, kind, session_id, input_tokens, output_tokens, cost_usd) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![now, kind, session_id, input, output, cost_usd],
     )?;
     Ok(())
@@ -99,12 +99,12 @@ pub fn summary(conn: &Connection) -> Result<Value> {
     };
 
     let spend = conn.query_row(
-        "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), SUM(cost_usd), COUNT(*) FROM claudius_spend",
+        "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), SUM(cost_usd), COUNT(*) FROM drifty_spend",
         [],
         |r| Ok(json!({"input": r.get::<_, i64>(0)?, "output": r.get::<_, i64>(1)?, "cost_usd": r.get::<_, Option<f64>>(2)?, "runs": r.get::<_, i64>(3)?})),
     )?;
     let mut st = conn.prepare(
-        "SELECT kind, COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cost_usd) FROM claudius_spend GROUP BY kind ORDER BY SUM(cost_usd) DESC",
+        "SELECT kind, COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cost_usd) FROM drifty_spend GROUP BY kind ORDER BY SUM(cost_usd) DESC",
     )?;
     let by_kind: Vec<Value> = st
         .query_map([], |r| {

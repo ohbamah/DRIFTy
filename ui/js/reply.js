@@ -35,7 +35,7 @@ export function bindReplies(container, rawOf, ctx) {
 }
 
 /** Le brouillon d'une conversation (même clé que la barre de saisie). */
-const draftKey = (target) => "claudius.draft." + (target.chat ? target.chat : "s:" + target.session);
+const draftKey = (target) => "drifty.draft." + (target.chat ? target.chat : "s:" + target.session);
 
 async function transferDialog(raw, ctx) {
   await ensureLoaded();
@@ -114,7 +114,7 @@ async function transferDialog(raw, ctx) {
       e.target.disabled = true;
       try {
         const chat = await api("/api/chats", { method: "POST", json: body });
-        if (!send) try { localStorage.setItem("claudius.draft." + chat.id, text); } catch {}
+        if (!send) try { localStorage.setItem("drifty.draft." + chat.id, text); } catch {}
         location.hash = `#/conversations?c=${chat.id}`;
         toast(send ? "Nouvelle conversation créée, réponse envoyée." : "Nouvelle conversation créée, réponse en brouillon.");
         dlg.close();

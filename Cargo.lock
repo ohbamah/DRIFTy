@@ -137,41 +137,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
-name = "claudius-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "rayon",
- "rusqlite",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "claudius-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "claudius-core",
- "form_urlencoded",
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "include_dir",
- "portable-pty",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -236,6 +201,41 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "drifty-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "drifty-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "drifty-core",
+ "form_urlencoded",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "include_dir",
+ "portable-pty",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+]
 
 [[package]]
 name = "either"

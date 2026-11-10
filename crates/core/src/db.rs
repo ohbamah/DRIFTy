@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS session_waste (
 );
 
 -- Ce que DRIFTy dépense lui-même (évaluations par agent, etc.).
-CREATE TABLE IF NOT EXISTS claudius_spend (
+CREATE TABLE IF NOT EXISTS drifty_spend (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            INTEGER NOT NULL,
     kind          TEXT NOT NULL,
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS fixes (
     path       TEXT NOT NULL
 );
 
--- Évaluations par agent (rapport conservé ; leur coût va aussi dans claudius_spend).
+-- Évaluations par agent (rapport conservé ; leur coût va aussi dans drifty_spend).
 CREATE TABLE IF NOT EXISTS evaluations (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id    TEXT NOT NULL,
@@ -199,6 +199,17 @@ CREATE TABLE IF NOT EXISTS archived (
     at         INTEGER NOT NULL
 );
 
+-- Worktrees archivés : dossier retiré (branche gardée) ou laissé en place.
+CREATE TABLE IF NOT EXISTS archived_worktrees (
+    repo_id  INTEGER NOT NULL,
+    worktree TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    branch   TEXT NOT NULL,
+    removed  INTEGER NOT NULL,
+    at       INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, worktree)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
@@ -216,6 +227,11 @@ pub fn open(path: &Path) -> Result<Connection> {
         for t in DERIVED_TABLES {
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {t};"))?;
         }
+    }
+    // Ancien nom de la table des dépenses de l'app (Claudius).
+    let legacy: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'claudius_spend'", [], |r| r.get::<_, i64>(0))? > 0;
+    if legacy {
+        conn.execute_batch("ALTER TABLE claudius_spend RENAME TO drifty_spend;")?;
     }
     conn.execute_batch(SCHEMA)?;
     add_column(&conn, "repos", "chat_mode", "TEXT NOT NULL DEFAULT 'worktree' CHECK (chat_mode IN ('worktree', 'project'))")?;

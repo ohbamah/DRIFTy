@@ -1,5 +1,5 @@
 //! Un port par worktree (comme Conductor) : une plage de 10 ports à partir de 4000,
-//! attribuée une fois et gardée. Fournie en `PORT` et `CLAUDIUS_PORT` aux commandes
+//! attribuée une fois et gardée. Fournie en `PORT` et `DRIFTY_PORT` aux commandes
 //! et aux agents du worktree. Le dépôt principal garde le port habituel de l'app.
 
 use anyhow::Result;
@@ -18,7 +18,7 @@ pub fn for_worktree(conn: &Connection, repo_id: i64, worktree: &str) -> Result<O
         return Ok(None);
     }
     let key = format!("port:{repo_id}:{worktree}");
-    if let Some(p) = claudius_core::db::setting(conn, &key)?.and_then(|v| v.parse::<u16>().ok()) {
+    if let Some(p) = drifty_core::db::setting(conn, &key)?.and_then(|v| v.parse::<u16>().ok()) {
         return Ok(Some(p));
     }
     let mut st = conn.prepare("SELECT v FROM settings WHERE k LIKE 'port:%'")?;
@@ -33,7 +33,7 @@ pub fn for_worktree(conn: &Connection, repo_id: i64, worktree: &str) -> Result<O
 
 /// Variables d'environnement d'un worktree (vide pour le dépôt principal).
 pub fn env(port: Option<u16>) -> Vec<(String, String)> {
-    port.map(|p| vec![("PORT".to_string(), p.to_string()), ("CLAUDIUS_PORT".to_string(), p.to_string())]).unwrap_or_default()
+    port.map(|p| vec![("PORT".to_string(), p.to_string()), ("DRIFTY_PORT".to_string(), p.to_string())]).unwrap_or_default()
 }
 
 /// Port fixé en dur dans un Procfile (qui ignorerait alors `PORT`) : `-p 3000`, `--port 3000`, `PORT=3000`.
@@ -59,7 +59,7 @@ pub fn hardcoded(dir: &str) -> Option<String> {
 mod tests {
     #[test]
     fn hardcoded_port_is_spotted() {
-        let d = std::env::temp_dir().join(format!("claudius-ports-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("drifty-ports-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("Procfile.dev"), "web: bin/rails server -p ${PORT:-3000}\n").unwrap();
         assert!(super::hardcoded(d.to_str().unwrap()).is_none());

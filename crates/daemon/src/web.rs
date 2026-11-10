@@ -25,6 +25,7 @@ use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{review_dir, worktree_env, ApiResult, App, ReviewTarget};
@@ -34,8 +35,28 @@ const INJECT: &str = include_str!("inject.js");
 const MAX_REWRITE: usize = 25 * 1024 * 1024;
 const HOP: [&str; 7] = ["connection", "keep-alive", "transfer-encoding", "te", "trailer", "proxy-authenticate", "proxy-connection"];
 
+/// Relais vivants, par origine visée.
 #[derive(Default, Clone)]
-pub struct Proxies(Arc<Mutex<HashMap<String, u16>>>);
+pub struct Proxies(Arc<Mutex<HashMap<String, Live>>>);
+
+struct Live {
+    port: u16,
+    last: Arc<AtomicI64>,
+    sockets: Arc<AtomicUsize>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Un relais sans requête, sans WebSocket ouvert et sans page qui le montre depuis ce délai est arrêté.
+const IDLE_MS: i64 = 180_000;
+
+/// Hôte d'un relais : un nom par relais (cookies isolés), sous le site de l'interface.
+fn relay_origin(port: u16) -> String {
+    format!("http://r{port}.drifty.localhost:{port}")
+}
 
 /// Une origine visée : `https://app.exemple.io` (port par défaut omis).
 #[derive(Clone)]
@@ -80,8 +101,10 @@ impl Origin {
 struct Relay {
     target: Origin,
     client: Client<Https, Body>,
-    own: String, // origine du relais : http://127.0.0.1:NNNN
+    own: String, // origine du relais : http://rNNNN.drifty.localhost:NNNN
     proxies: Proxies,
+    last: Arc<AtomicI64>,
+    sockets: Arc<AtomicUsize>,
 }
 
 impl Proxies {
@@ -92,24 +115,58 @@ impl Proxies {
     }
 
     async fn port_for_inner(&self, o: &Origin) -> Result<u16> {
-        if let Some(p) = self.0.lock().unwrap().get(&o.key()) {
-            return Ok(*p);
+        if let Some(l) = self.0.lock().unwrap().get(&o.key()) {
+            l.last.store(now_ms(), Ordering::SeqCst);
+            return Ok(l.port);
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let https = hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().build();
+        let (last, sockets) = (Arc::new(AtomicI64::new(now_ms())), Arc::new(AtomicUsize::new(0)));
         let relay = Arc::new(Relay {
             target: o.clone(),
             client: Client::builder(TokioExecutor::new()).build(https),
-            own: format!("http://127.0.0.1:{port}"),
+            own: relay_origin(port),
             proxies: self.clone(),
+            last: last.clone(),
+            sockets: sockets.clone(),
         });
         let app = axum::Router::new().fallback(forward).with_state(relay);
-        tokio::spawn(async move {
+        let mut tasks = Vec::new();
+        // `rN.drifty.localhost` se résout d'abord en ::1 : on y écoute aussi, au même port.
+        if let Ok(l6) = tokio::net::TcpListener::bind(("::1", port)).await {
+            let a = app.clone();
+            tasks.push(tokio::spawn(async move {
+                let _ = axum::serve(l6, a).await;
+            }));
+        }
+        tasks.push(tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
-        });
-        self.0.lock().unwrap().insert(o.key(), port);
+        }));
+        self.0.lock().unwrap().insert(o.key(), Live { port, last, sockets, tasks });
         Ok(port)
+    }
+
+    /// Une page montre encore ces relais (battement de l'onglet navigateur).
+    fn touch(&self, origins: &[String]) {
+        for l in self.0.lock().unwrap().values() {
+            if origins.iter().any(|o| *o == relay_origin(l.port)) {
+                l.last.store(now_ms(), Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Arrête les relais inactifs (ni requête, ni WebSocket, ni page qui les montre).
+    pub fn reap(&self) {
+        let now = now_ms();
+        let mut map = self.0.lock().unwrap();
+        map.retain(|_, l| {
+            let alive = l.sockets.load(Ordering::SeqCst) > 0 || now - l.last.load(Ordering::SeqCst) < crate::reap_ms(IDLE_MS);
+            if !alive {
+                l.tasks.iter().for_each(|t| t.abort());
+            }
+            alive
+        });
     }
 }
 
@@ -167,11 +224,12 @@ impl Relay {
             return Some(format!("{}{pq}", self.own));
         }
         let port = self.proxies.port_for(&o).await.ok()?;
-        Some(format!("http://127.0.0.1:{port}{pq}"))
+        Some(format!("{}{pq}", relay_origin(port)))
     }
 }
 
 async fn forward(State(r): State<Arc<Relay>>, mut req: Request) -> Response {
+    r.last.store(now_ms(), Ordering::SeqCst);
     let pq = req.uri().path_and_query().map(|x| x.as_str().to_string()).unwrap_or_else(|| "/".into());
     if pq == "/__drifty/inject.js" {
         let js = INJECT.replace("__TARGET__", &serde_json::to_string(&r.target.display()).unwrap_or_default());
@@ -273,10 +331,14 @@ async fn websocket(r: Arc<Relay>, mut req: Request) -> Response {
         return resp.map(Body::new).into_response();
     }
     let from_site = hyper::upgrade::on(&mut resp);
+    let (sockets, last) = (r.sockets.clone(), r.last.clone());
     tokio::spawn(async move {
         let (Ok(page), Ok(site)) = (from_page.await, from_site.await) else { return };
         let (mut page, mut site) = (hyper_util::rt::TokioIo::new(page), hyper_util::rt::TokioIo::new(site));
+        sockets.fetch_add(1, Ordering::SeqCst); // un WebSocket ouvert garde le relais en vie
         let _ = tokio::io::copy_bidirectional(&mut page, &mut site).await;
+        sockets.fetch_sub(1, Ordering::SeqCst);
+        last.store(now_ms(), Ordering::SeqCst);
     });
     let (parts, _) = resp.into_parts();
     Response::from_parts(parts, Body::empty())
@@ -297,7 +359,19 @@ pub async fn open(State(app): State<App>, Json(r): Json<OpenReq>) -> ApiResult {
     let o = Origin::of(&uri).ok_or_else(|| anyhow::anyhow!("The page cannot open because only http and https addresses can be shown."))?;
     let port = app.web.port_for(&o).await?;
     let pq = uri.path_and_query().map(|x| x.as_str()).unwrap_or("/");
-    Ok(Json(json!({"src": format!("http://127.0.0.1:{port}{pq}"), "url": raw, "relay": format!("http://127.0.0.1:{port}")})))
+    Ok(Json(json!({"src": format!("{}{pq}", relay_origin(port)), "url": raw, "relay": relay_origin(port)})))
+}
+
+#[derive(Deserialize)]
+pub struct AliveReq {
+    #[serde(default)]
+    relays: Vec<String>,
+}
+
+/// Battement des onglets navigateur ouverts : leurs relais restent en vie.
+pub async fn alive(State(app): State<App>, Json(r): Json<AliveReq>) -> ApiResult {
+    app.web.touch(&r.relays);
+    Ok(Json(json!({"ok": true})))
 }
 
 /// Adresse proposée par défaut : le serveur du worktree (son port), s'il en a un.

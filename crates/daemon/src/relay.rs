@@ -1,4 +1,4 @@
-//! `claudiusd statusline --slot <compte> [-- <commande d'origine>]`
+//! `driftyd statusline --slot <compte> [-- <commande d'origine>]`
 //!
 //! Appelé par Claude Code à chaque mise à jour de sa statusline : relève
 //! `rate_limits` pour DRIFTy, puis rejoue la statusline d'origine avec la
@@ -14,8 +14,8 @@ pub fn run(args: &[String]) -> i32 {
 
     let mut input = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut input);
-    if let Err(e) = claudius_core::usage::record(&slot, &input) {
-        eprintln!("claudius: relevé d'usage impossible : {e:#}");
+    if let Err(e) = drifty_core::usage::record(&slot, &input) {
+        eprintln!("drifty: relevé d'usage impossible : {e:#}");
     }
 
     let Some(cmd) = wrapped.filter(|c| !c.trim().is_empty()) else { return 0 };
@@ -23,7 +23,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("claudius: la statusline d'origine ne peut pas démarrer : {e}");
+            eprintln!("drifty: la statusline d'origine ne peut pas démarrer : {e}");
             return 1;
         }
     };

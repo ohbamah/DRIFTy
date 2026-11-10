@@ -41,6 +41,13 @@ function hidePanel() {
   layer.hidden = true;
 }
 
+// Battement : les relais des onglets navigateur encore ouverts restent en vie côté serveur
+// (un relais sans activité ni page qui le montre est arrêté au bout de 3 min).
+setInterval(() => {
+  const relays = [...reg.values()].flatMap((st) => st.tabs.filter((t) => t.kind === "web" && t.relay).map((t) => t.relay));
+  if (relays.length) api("/api/web/alive", { method: "POST", json: { relays: [...new Set(relays)] } }).catch(() => {});
+}, 60_000);
+
 // ------------------------------------------------------------ xterm.js, chargé à la demande
 let xtermReady = null;
 function loadXterm() {
@@ -124,6 +131,7 @@ async function makeBrowser(target, deliver, { url = "", openTab = null } = {}) {
     const m = e.data;
     if (m.type === "nav") {
       tab.url = m.url;
+      tab.relay = m.relay;
       if (document.activeElement !== input) input.value = m.url;
       try { tab.title = m.title?.trim() || new URL(m.url).host; } catch {}
       tab.rename?.(tab.title.slice(0, 40));
@@ -146,6 +154,7 @@ async function makeBrowser(target, deliver, { url = "", openTab = null } = {}) {
     try {
       const r = await api("/api/web", { method: "POST", json: { url } });
       tab.url = r.url;
+      tab.relay = r.relay;
       input.value = r.url;
       input.blur(); // l'adresse réelle (après redirections) s'affichera au chargement
       frame.src = r.src;

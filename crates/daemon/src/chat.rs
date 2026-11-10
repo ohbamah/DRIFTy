@@ -107,13 +107,23 @@ pub struct Chat {
     /// Requêtes de contrôle dont on attend la réponse (question annexe), par identifiant.
     waiters: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>,
     tx: broadcast::Sender<Value>,
+    /// Signal du hub : ce chat a changé (statut, coût, file, nom…).
+    changed: broadcast::Sender<()>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     child: tokio::sync::Mutex<Option<Child>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Hub {
     chats: Arc<Mutex<HashMap<String, Arc<Chat>>>>,
+    /// « La liste a changé » : poussé aux pages (flux `/api/events`) au lieu d'être relu.
+    changed: broadcast::Sender<()>,
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Hub { chats: Arc::default(), changed: broadcast::channel(64).0 }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -131,13 +141,18 @@ impl Chat {
         let msg = {
             let mut st = self.state.lock().unwrap();
             st.seq += 1;
-            let msg = json!({"seq": st.seq, "ev": ev});
+            // `at` : quand l'événement est arrivé (heure de fin d'un tour, par exemple).
+            let msg = json!({"seq": st.seq, "at": now_ms(), "ev": ev});
             if msg["ev"]["type"] != "stream_event" {
                 st.events.push(msg.clone());
             }
             msg
         };
+        let streamed = msg["ev"]["type"] == "stream_event";
         let _ = self.tx.send(msg);
+        if !streamed {
+            let _ = self.changed.send(());
+        }
     }
 
     fn set_status(&self, s: &'static str) {
@@ -149,7 +164,7 @@ impl Chat {
             }
             st.status = s;
         }
-        self.emit(json!({"type": "claudius", "kind": "status", "status": s}));
+        self.emit(json!({"type": "drifty", "kind": "status", "status": s}));
     }
 
     pub fn summary(&self) -> Value {
@@ -196,7 +211,7 @@ impl Chat {
         };
         match queued {
             Some(id) => {
-                self.emit(json!({"type": "claudius", "kind": "queued", "id": id, "text": text, "image_count": images.len()}));
+                self.emit(json!({"type": "drifty", "kind": "queued", "id": id, "text": text, "image_count": images.len()}));
                 Ok(())
             }
             None => self.transmit(text, images).await,
@@ -219,7 +234,7 @@ impl Chat {
             st.images.extend(images);
             (start..st.images.len()).collect()
         };
-        self.emit(json!({"type": "claudius", "kind": "user_sent", "text": text, "images": refs, "ts": now_ms()}));
+        self.emit(json!({"type": "drifty", "kind": "user_sent", "text": text, "images": refs, "ts": now_ms()}));
         self.set_status("working");
         Ok(())
     }
@@ -227,6 +242,7 @@ impl Chat {
     /// L'utilisateur a regardé la discussion : ce qui est fini est lu.
     pub fn mark_seen(&self) {
         self.state.lock().unwrap().seen_at = now_ms();
+        let _ = self.changed.send(());
     }
 
     pub fn image(&self, n: usize) -> Option<Image> {
@@ -244,7 +260,7 @@ impl Chat {
                 .ok_or_else(|| anyhow::anyhow!("The message cannot be taken back because it has already been sent to Claude."))?;
             st.queue.remove(pos).1
         };
-        self.emit(json!({"type": "claudius", "kind": "unqueued", "id": qid}));
+        self.emit(json!({"type": "drifty", "kind": "unqueued", "id": qid}));
         Ok(text)
     }
 
@@ -261,7 +277,7 @@ impl Chat {
             let (_, text, images) = st.queue.remove(pos);
             (text, images)
         };
-        self.emit(json!({"type": "claudius", "kind": "unqueued", "id": qid}));
+        self.emit(json!({"type": "drifty", "kind": "unqueued", "id": qid}));
         self.transmit(&text, images).await
     }
 
@@ -272,9 +288,9 @@ impl Chat {
             if st.queue.is_empty() { None } else { Some(st.queue.remove(0)) }
         };
         if let Some((id, text, images)) = next {
-            self.emit(json!({"type": "claudius", "kind": "unqueued", "id": id}));
+            self.emit(json!({"type": "drifty", "kind": "unqueued", "id": id}));
             if let Err(e) = self.transmit(&text, images).await {
-                self.emit(json!({"type": "claudius", "kind": "stderr", "text": format!("error: {e}")}));
+                self.emit(json!({"type": "drifty", "kind": "stderr", "text": format!("error: {e}")}));
             }
         }
     }
@@ -294,7 +310,7 @@ impl Chat {
         };
         self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}}))
             .await?;
-        self.emit(json!({"type": "claudius", "kind": "permission_resolved", "request_id": request_id, "allow": allow}));
+        self.emit(json!({"type": "drifty", "kind": "permission_resolved", "request_id": request_id, "allow": allow}));
         Ok(())
     }
 
@@ -334,6 +350,7 @@ impl Chat {
 
     pub fn rename(&self, name: &str) {
         *self.title.lock().unwrap() = name.to_string();
+        let _ = self.changed.send(());
     }
 
     pub fn session_id(&self) -> Option<String> {
@@ -367,7 +384,12 @@ impl Hub {
         let chat = self.get(id)?;
         chat.kill().await;
         self.chats.lock().unwrap().remove(id);
+        let _ = self.changed.send(());
         Ok(())
+    }
+
+    pub fn watch(&self) -> broadcast::Receiver<()> {
+        self.changed.subscribe()
     }
 
     pub async fn start(&self, spec: LaunchSpec, first_message: Option<(String, Vec<Image>)>) -> Result<Arc<Chat>> {
@@ -378,8 +400,8 @@ impl Hub {
         } else {
             cmd.args(["--permission-mode", "manual", "--permission-prompt-tool", "stdio"]);
         }
-        // Modèle choisi pour la discussion ; à défaut, réglage de test (`CLAUDIUS_CHAT_MODEL`), sinon celui du compte.
-        if let Some(m) = spec.model.clone().or_else(|| std::env::var("CLAUDIUS_CHAT_MODEL").ok()) {
+        // Modèle choisi pour la discussion ; à défaut, réglage de test (`DRIFTY_CHAT_MODEL`), sinon celui du compte.
+        if let Some(m) = spec.model.clone().or_else(|| std::env::var("DRIFTY_CHAT_MODEL").ok()) {
             cmd.args(["--model", &m]);
         }
         if let Some(sid) = &spec.resume {
@@ -389,7 +411,7 @@ impl Hub {
             }
         }
         // `~/.claude` est le dossier par défaut : ne pas le forcer (la variable déplace aussi l'identification).
-        let default_dir = claudius_core::home().join(".claude");
+        let default_dir = drifty_core::home().join(".claude");
         if let Some(dir) = spec.config_dir.as_ref().filter(|d| std::path::Path::new(d) != default_dir) {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
@@ -429,10 +451,12 @@ impl Hub {
                 seen_at: 0,
             }),
             tx,
+            changed: self.changed.clone(),
             stdin: tokio::sync::Mutex::new(stdin),
             child: tokio::sync::Mutex::new(Some(child)),
         });
         self.chats.lock().unwrap().insert(chat.id.clone(), chat.clone());
+        let _ = self.changed.send(());
 
         // Lecture de la sortie : chaque ligne JSON devient un événement.
         {
@@ -467,7 +491,7 @@ impl Hub {
                         Some("control_response") if ev.pointer("/response/response/model").is_some() => {
                             let m = ev.pointer("/response/response/model").and_then(Value::as_str).map(str::to_string);
                             chat.state.lock().unwrap().model = m.clone();
-                            chat.emit(json!({"type": "claudius", "kind": "model", "model": m}));
+                            chat.emit(json!({"type": "drifty", "kind": "model", "model": m}));
                         }
                         Some("control_request") if ev["request"]["subtype"] == "can_use_tool" => {
                             if let Some(rid) = ev["request_id"].as_str() {
@@ -476,7 +500,7 @@ impl Hub {
                         }
                         Some("rate_limit_event") => {
                             if let (Some(slot), Some(w)) = (&slot, ev.pointer("/rate_limit_info/unifiedWindows")) {
-                                let _ = claudius_core::usage::record_unified(slot, w);
+                                let _ = drifty_core::usage::record_unified(slot, w);
                             }
                         }
                         Some("result") => {
@@ -490,7 +514,7 @@ impl Hub {
                                 st.tokens += turn;
                                 (st.tokens, st.cost_usd)
                             };
-                            chat.emit(json!({"type": "claudius", "kind": "tokens", "total": total, "cost": cost_total}));
+                            chat.emit(json!({"type": "drifty", "kind": "tokens", "total": total, "cost": cost_total}));
                         }
                         _ => {}
                     }
@@ -503,8 +527,8 @@ impl Hub {
                             .flatten()
                             .filter(|b| b["type"] == "tool_use")
                             .filter_map(|b| {
-                                let (a, r) = claudius_core::diffstat::for_tool(b["name"].as_str().unwrap_or(""), &b["input"])?;
-                                Some(json!({"type": "claudius", "kind": "diff", "tool_id": b["id"], "added": a, "removed": r}))
+                                let (a, r) = drifty_core::diffstat::for_tool(b["name"].as_str().unwrap_or(""), &b["input"])?;
+                                Some(json!({"type": "drifty", "kind": "diff", "tool_id": b["id"], "added": a, "removed": r}))
                             })
                             .collect()
                     } else {
@@ -524,7 +548,7 @@ impl Hub {
                     Some(c) => c.wait().await.ok().and_then(|s| s.code()),
                     None => None,
                 };
-                chat.emit(json!({"type": "claudius", "kind": "exit", "code": code}));
+                chat.emit(json!({"type": "drifty", "kind": "exit", "code": code}));
                 chat.set_status("exited");
             });
         }
@@ -535,7 +559,7 @@ impl Hub {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     if !line.trim().is_empty() {
-                        chat.emit(json!({"type": "claudius", "kind": "stderr", "text": line.chars().take(500).collect::<String>()}));
+                        chat.emit(json!({"type": "drifty", "kind": "stderr", "text": line.chars().take(500).collect::<String>()}));
                     }
                 }
             });
@@ -583,7 +607,7 @@ impl Watch {
                         .take(160)
                         .collect();
                     let name = b["name"].as_str().unwrap_or("").to_string();
-                    self.calls.insert(b["id"].as_str().unwrap_or("").to_string(), (name, claudius_core::extract::fnv1a(input.as_bytes()), target));
+                    self.calls.insert(b["id"].as_str().unwrap_or("").to_string(), (name, drifty_core::extract::fnv1a(input.as_bytes()), target));
                 }
             }
             Some("user") => {
@@ -596,13 +620,13 @@ impl Watch {
                         self.streak = if self.last_error.as_ref() == Some(&key) { self.streak + 1 } else { 1 };
                         self.last_error = Some(key);
                         if self.streak == LOOP_AFTER {
-                            out.push(json!({"type": "claudius", "kind": "waste", "what": "loop", "tool": name, "target": target, "count": self.streak}));
+                            out.push(json!({"type": "drifty", "kind": "waste", "what": "loop", "tool": name, "target": target, "count": self.streak}));
                         }
                         // Échec évitable connu : la consigne du catalogue, une fois par type et par chat.
-                        if let Some(f) = claudius_core::fixes::avoidable(&body) {
+                        if let Some(f) = drifty_core::fixes::avoidable(&body) {
                             if self.hinted.insert(f.key) {
-                                out.push(json!({"type": "claudius", "kind": "waste", "what": "avoidable", "tool": name, "target": target,
-                                                 "rule": claudius_core::fixes::rule_text(f.key, f.item.as_deref())}));
+                                out.push(json!({"type": "drifty", "kind": "waste", "what": "avoidable", "tool": name, "target": target,
+                                                 "rule": drifty_core::fixes::rule_text(f.key, f.item.as_deref())}));
                             }
                         }
                     } else {
@@ -610,7 +634,7 @@ impl Watch {
                         self.last_error = None;
                     }
                     if body.len() > BIG_OUTPUT {
-                        out.push(json!({"type": "claudius", "kind": "waste", "what": "big", "tool": name, "target": target, "bytes": body.len()}));
+                        out.push(json!({"type": "drifty", "kind": "waste", "what": "big", "tool": name, "target": target, "bytes": body.len()}));
                     }
                 }
             }
@@ -620,9 +644,14 @@ impl Watch {
     }
 }
 
-/// Emplacement des worktrees créés par DRIFTy : `~/claudius/worktrees/<dépôt>/<nom>` (un seul point).
+/// Emplacement des worktrees créés par DRIFTy : `~/drifty/worktrees/<dépôt>/<nom>` (un seul point).
 pub fn worktree_path(repo_name: &str, name: &str) -> std::path::PathBuf {
-    claudius_core::home().join("claudius").join("worktrees").join(repo_name).join(name)
+    drifty_core::home().join("drifty").join("worktrees").join(repo_name).join(name)
+}
+
+/// Emplacements où chercher un worktree créé par l'app : l'actuel, puis celui de l'ancien nom.
+pub fn worktree_paths(repo_name: &str, name: &str) -> [std::path::PathBuf; 2] {
+    [worktree_path(repo_name, name), drifty_core::home().join("claudius").join("worktrees").join(repo_name).join(name)]
 }
 
 /// Crée un worktree isolé `<racine>/<nom>` sur une nouvelle branche `<nom>`.

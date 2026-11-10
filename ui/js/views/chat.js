@@ -1,5 +1,5 @@
 // Chat dans l'app : un processus `claude` piloté par le démon, suivi en direct.
-import { api, esc, usd, tok, icon, slotChip, toast, loader, imageStrip, diffStat, modelLabel, $, $$ } from "../lib.js";
+import { api, esc, usd, tok, dur, icon, slotChip, toast, loader, imageStrip, diffStat, modelLabel, $, $$ } from "../lib.js";
 import { md } from "../md.js";
 import { attachImprove } from "../improve.js";
 import { attachSlash } from "../slash.js";
@@ -58,7 +58,7 @@ export function newChatDialog(repo, onStarted) {
       </div>
     </label>
     <label>Message</label>
-    <textarea class="field area" id="nc-text" rows="4" placeholder="Que doit faire Claude ?"></textarea>
+    <div class="nc-msg"><textarea class="field area" id="nc-text" rows="4" placeholder="Que doit faire Claude ? (/ pour les commandes)"></textarea></div>
     <label>Modèle<span id="nc-model" class="nc-model"></span></label>
     <label class="check"><input type="checkbox" id="nc-bypass" checked> Tout autoriser (bypass)</label>
     <div class="muted small">${slotChip(repo.slot)} ${esc(repo.name)}</div>
@@ -70,6 +70,8 @@ export function newChatDialog(repo, onStarted) {
     </div>
   </form>`;
   document.body.append(dlg);
+  // Commandes `/` du projet (la discussion n'existe pas encore) : branchées avant le reste.
+  attachSlash($("#nc-text", dlg), () => ({ repo: repo.id }), $(".nc-msg", dlg));
   attachImprove($("#nc-text", dlg), () => ({ repo_id: repo.id }));
   let model = "";
   modelPicker($("#nc-model", dlg), repo.slot, "", (v) => { model = v; });
@@ -171,7 +173,7 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
   el.addEventListener("dragover", (e) => { e.preventDefault(); el.classList.add("drop"); });
   el.addEventListener("dragleave", () => el.classList.remove("drop"));
   el.addEventListener("drop", (e) => { e.preventDefault(); el.classList.remove("drop"); addFiles(e.dataTransfer.files); });
-  const key = draftKey ? "claudius.draft." + draftKey : "";
+  const key = draftKey ? "drifty.draft." + draftKey : "";
   try { if (key) ta.value = localStorage.getItem(key) || ""; } catch {}
   const save = () => { try { if (key) ta.value ? localStorage.setItem(key, ta.value) : localStorage.removeItem(key); } catch {} };
   // Hauteur = contenu + bordure (sinon il manque 2 px et une barre de défilement apparaît pour rien).
@@ -565,7 +567,7 @@ export async function renderLive(box, chatId, onMeta) {
     const h = mine.five_hour, w = mine.seven_day;
     const hot = h?.used_percentage >= 85 ? ["session 5 h", h] : w?.used_percentage >= 90 ? ["semaine", w] : null;
     if (!hot) { tipBar.hidden = true; return; }
-    const key = `claudius.tip.${info.slot}.${hot[1].resets_at_ms}`;
+    const key = `drifty.tip.${info.slot}.${hot[1].resets_at_ms}`;
     try { if (localStorage.getItem(key)) return; } catch {}
     const other = accs.find((a) => a.enabled && a.slot !== info.slot && (a.five_hour?.used_percentage ?? 0) < 50);
     const light = !/sonnet|haiku/.test(String(info.model || ""));
@@ -584,7 +586,7 @@ export async function renderLive(box, chatId, onMeta) {
       const last = [...replyRaw.values()].filter(Boolean).pop() || "";
       try {
         const c = await api("/api/chats", { method: "POST", json: { repo_id: info.repo_id, mode: "existing", worktree: info.worktree || "", slot: other.slot, title: `${info.name} (suite)`, bypass: info.bypass } });
-        try { localStorage.setItem("claudius.draft." + c.id, `Je reprends un travail commencé dans une autre conversation (« ${info.name} »). Dernier point :\n\n${last.trim().slice(-3000)}\n\nContinue à partir de là.`); } catch {}
+        try { localStorage.setItem("drifty.draft." + c.id, `Je reprends un travail commencé dans une autre conversation (« ${info.name} »). Dernier point :\n\n${last.trim().slice(-3000)}\n\nContinue à partir de là.`); } catch {}
         location.hash = `#/conversations?c=${c.id}`;
       } catch (e) { toast(e.message, true); }
     });
@@ -648,9 +650,9 @@ export async function renderLive(box, chatId, onMeta) {
   await loadBarCfg();
   onMeta?.({ tokens: info.tokens_total, cost: info.cost_usd });
 
-  const handle = (ev) => {
+  const handle = (ev, at) => {
     const t = ev.type;
-    if (t === "claudius") {
+    if (t === "drifty") {
       if (ev.kind === "waste") showWaste(ev);
       else if (ev.kind === "tokens") onMeta?.({ tokens: ev.total, cost: ev.cost });
       else if (ev.kind === "model") { showModel(ev.model); add(`<div class="event">Modèle : ${esc(modelLabel(ev.model, models))}</div>`); }
@@ -730,7 +732,11 @@ export async function renderLive(box, chatId, onMeta) {
       if (live) { live.remove(); live = null; }
       cost += ev.total_cost_usd || 0;
       const u = ev.usage || {};
-      add(`<div class="event">${ev.is_error ? "Erreur" : "Terminé"} · ${usd(ev.total_cost_usd || 0)} · ${tok((u.output_tokens || 0))} tokens écrits</div>`);
+      // Fin du tour : heure (et jour s'il n'est pas aujourd'hui), durée, coût, tokens écrits.
+      const end = new Date(at || Date.now());
+      const today = end.toDateString() === new Date().toDateString();
+      const when = end.toLocaleString("fr-FR", today ? { hour: "2-digit", minute: "2-digit" } : { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+      add(`<div class="event" title="${esc(end.toLocaleString("fr-FR"))}">${ev.is_error ? "Erreur" : "Terminé"} à ${esc(when)}${ev.duration_ms ? ` · ${dur(ev.duration_ms)}` : ""} · ${usd(ev.total_cost_usd || 0)} · ${tok((u.output_tokens || 0))} tokens écrits</div>`);
       curReply = null;
       onMeta?.({ cost });
     }
@@ -738,10 +744,10 @@ export async function renderLive(box, chatId, onMeta) {
 
   source = new EventSource(`/api/chats/${chatId}/events`);
   source.onmessage = (m) => {
-    const { seq, ev } = JSON.parse(m.data);
+    const { seq, ev, at } = JSON.parse(m.data);
     if (seq <= lastSeq) return;
     lastSeq = seq;
-    handle(ev);
+    handle(ev, at);
   };
   source.onerror = () => {}; // le navigateur se reconnecte seul ; le rejeu est dédoublonné par `seq`
   scroller.scrollTop = scroller.scrollHeight;

@@ -1,5 +1,5 @@
 [package]
-name = "claudius-core"
+name = "drifty-core"
 version.workspace = true
 edition.workspace = true
 

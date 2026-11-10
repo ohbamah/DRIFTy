@@ -1,4 +1,4 @@
-//! claudiusd — démon local : synchronisation périodique + API JSON + interface web.
+//! driftyd — démon local : synchronisation périodique + API JSON + interface web.
 //! L'interface ne connaît que ce protocole HTTP/JSON : le démon peut être
 //! réécrit dans un autre langage sans la toucher.
 
@@ -10,6 +10,7 @@ mod setup;
 mod side;
 mod term;
 mod web;
+mod worktrees;
 mod sounds;
 mod improve;
 mod launch;
@@ -29,7 +30,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use claudius_core::{db, digest, query, repos, transcript};
+use drifty_core::{db, digest, query, repos, transcript};
 use include_dir::{include_dir, Dir};
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -48,8 +49,10 @@ struct App {
     models: Arc<models::Cache>,
     read: Arc<Mutex<Connection>>,
     syncing: Arc<AtomicBool>,
-    last: Arc<Mutex<Option<(i64, claudius_core::SyncReport)>>>,
-    origin: Arc<String>,
+    last: Arc<Mutex<Option<(i64, drifty_core::SyncReport)>>>,
+    /// Origines de l'interface : `drifty.localhost:<port>` (celle qu'on sert), et les
+    /// adresses de bouclage qui y redirigent.
+    origins: Arc<Vec<String>>,
     terms: term::Terms,
     web: web::Proxies,
 }
@@ -94,7 +97,7 @@ fn trigger_sync(app: &App) -> bool {
     }
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
-        match db::open(&claudius_core::db_path()).and_then(|mut c| claudius_core::sync(&mut c)) {
+        match db::open(&drifty_core::db_path()).and_then(|mut c| drifty_core::sync(&mut c)) {
             Ok(r) => {
                 if r.ingest.files_read > 0 {
                     eprintln!(
@@ -116,7 +119,7 @@ fn trigger_sync(app: &App) -> bool {
 async fn same_origin(State(app): State<App>, req: Request, next: Next) -> Response {
     if req.method() != Method::GET {
         let origin = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok());
-        if origin != Some(app.origin.as_str()) {
+        if !app.trusted(origin) {
             return (StatusCode::FORBIDDEN, Json(json!({"error": "The request cannot be accepted because it does not come from the DRIFTy interface."})))
                 .into_response();
         }
@@ -124,11 +127,36 @@ async fn same_origin(State(app): State<App>, req: Request, next: Next) -> Respon
     next.run(req).await
 }
 
+impl App {
+    fn trusted(&self, origin: Option<&str>) -> bool {
+        origin.is_some_and(|o| self.origins.iter().any(|x| x == o))
+    }
+}
+
+/// Délai avant de fermer un orphelin (terminal, relais) ; `DRIFTY_REAP_MS` le raccourcit pour les tests.
+fn reap_ms(default: i64) -> i64 {
+    std::env::var("DRIFTY_REAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Port d'écoute d'une adresse `hôte:port`.
+fn port_of(addr: &str) -> u16 {
+    addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(4317)
+}
+
 async fn static_file(Path(path): Path<String>) -> Response {
     serve(&path)
 }
 
-async fn index() -> Response {
+/// L'interface est servie sous `drifty.localhost` : les pages de l'onglet navigateur
+/// passent par des relais `rN.drifty.localhost` du MÊME site (cookies acceptés dans le
+/// cadre) mais d'hôtes distincts (cookies isolés d'un site à l'autre). Une adresse de
+/// bouclage y redirige.
+async fn index(headers: axum::http::HeaderMap) -> Response {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let (name, port) = host.rsplit_once(':').unwrap_or((host, ""));
+    if matches!(name, "127.0.0.1" | "localhost" | "[::1]") && !port.is_empty() {
+        return axum::response::Redirect::temporary(&format!("http://drifty.localhost:{port}/")).into_response();
+    }
     serve("index.html")
 }
 
@@ -247,11 +275,11 @@ struct FixPath {
 }
 
 async fn fix_propose(State(app): State<App>, Path(p): Path<FixPath>) -> ApiResult {
-    with_conn(&app, move |c| claudius_core::fixes::propose(c, &p.id, &p.cause)).await
+    with_conn(&app, move |c| drifty_core::fixes::propose(c, &p.id, &p.cause)).await
 }
 
 async fn fix_apply(State(app): State<App>, Path(p): Path<FixPath>) -> ApiResult {
-    with_conn(&app, move |c| claudius_core::fixes::apply(c, &p.id, &p.cause)).await
+    with_conn(&app, move |c| drifty_core::fixes::apply(c, &p.id, &p.cause)).await
 }
 
 // ------------------------------------------------------------ chats
@@ -382,10 +410,10 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
                     .ok();
                 // Pas encore analysé (créé dans l'app) : emplacement des worktrees de DRIFTy.
                 let dir_name = std::path::Path::new(&root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(repo_name.clone());
-                let own = chat::worktree_path(&dir_name, &wt);
+                let own = chat::worktree_paths(&dir_name, &wt);
                 let cwd = cwd
                     .filter(|p| std::path::Path::new(p).is_dir())
-                    .or_else(|| own.is_dir().then(|| own.to_string_lossy().into_owned()))
+                    .or_else(|| own.iter().find(|p| p.is_dir()).map(|p| p.to_string_lossy().into_owned()))
                     .ok_or_else(|| {
                     anyhow::anyhow!("The worktree `{wt}` cannot be used because its folder is unknown or no longer exists.")
                 })?;
@@ -502,11 +530,11 @@ async fn review_message(State(app): State<App>, Json(t): Json<ReviewTarget>) -> 
     let config_dir = with_conn(&app, move |c| Ok(json!(repos::account_dir(c, slot.as_deref())?))).await?.0;
     const SYSTEM: &str = "Écris un message de commit git pour ces changements : une ligne de résumé (72 caractères au plus, à l'impératif), \
 puis si utile une ligne vide et 1 à 4 puces brèves. Même langue que le code et les commentaires. Réponds uniquement avec le message.";
-    let model = std::env::var("CLAUDIUS_IMPROVE_MODEL").unwrap_or_else(|_| "haiku".into());
+    let model = std::env::var("DRIFTY_IMPROVE_MODEL").unwrap_or_else(|_| "haiku".into());
     let r = improve::oneshot(SYSTEM, &summary, config_dir.as_str(), &model, "The commit message cannot be generated").await?;
     let (i, o, cost) = (r.input_tokens, r.output_tokens, r.cost_usd);
     let _ = with_conn(&app, move |c| {
-        claudius_core::ledger::record_spend(c, "commit-message", None, i, o, cost)?;
+        drifty_core::ledger::record_spend(c, "commit-message", None, i, o, cost)?;
         Ok(json!({}))
     })
     .await?;
@@ -537,13 +565,13 @@ async fn commands_analyze(State(app): State<App>, Path(id): Path<i64>) -> ApiRes
     })
     .await?
     .0;
-    let model = std::env::var("CLAUDIUS_IMPROVE_MODEL").unwrap_or_else(|_| "sonnet".into());
+    let model = std::env::var("DRIFTY_IMPROVE_MODEL").unwrap_or_else(|_| "sonnet".into());
     let r = improve::oneshot(commands::ANALYZE_SYSTEM, v[0].as_str().unwrap_or(""), v[1].as_str(), &model, "The launch commands cannot be analysed").await?;
     let found = commands::parse_analysis(&r.text)?;
     let (i, o, cost) = (r.input_tokens, r.output_tokens, r.cost_usd);
     let saved = found.clone();
     let _ = with_conn(&app, move |c| {
-        claudius_core::ledger::record_spend(c, "launch-analysis", None, i, o, cost)?;
+        drifty_core::ledger::record_spend(c, "launch-analysis", None, i, o, cost)?;
         db::set_setting(c, &format!("cmd:{id}"), &json!({"test": saved["test"], "run": saved["run"]}).to_string())?;
         Ok(json!({}))
     })
@@ -608,7 +636,7 @@ struct SearchQ {
 }
 
 async fn search(State(app): State<App>, Query(q): Query<SearchQ>) -> ApiResult {
-    with_conn(&app, move |c| claudius_core::search::search(c, &q.q, 40)).await
+    with_conn(&app, move |c| drifty_core::search::search(c, &q.q, 40)).await
 }
 
 // ------------------------------------------------------------ prompts sauvegardés
@@ -686,7 +714,7 @@ async fn conv_rename(State(app): State<App>, Path(id): Path<String>, Json(t): Js
     let sid = id.clone();
     let title = t.title.trim().to_string();
     let v = with_conn(&app, move |c| {
-        claudius_core::convs::rename(c, &sid, &title)?;
+        drifty_core::convs::rename(c, &sid, &title)?;
         Ok(json!({"ok": true, "title": title}))
     })
     .await?;
@@ -718,7 +746,7 @@ async fn chat_rename(State(app): State<App>, Path(id): Path<String>, Json(t): Js
         if known == true {
             let t2 = title.clone();
             let _ = with_conn(&app, move |c| {
-                claudius_core::convs::rename(c, &sid, &t2)?;
+                drifty_core::convs::rename(c, &sid, &t2)?;
                 Ok(json!({}))
             })
             .await?;
@@ -730,7 +758,7 @@ async fn chat_rename(State(app): State<App>, Path(id): Path<String>, Json(t): Js
 
 async fn conv_archive(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     with_conn(&app, move |c| {
-        claudius_core::convs::archive(c, &id, now_ms())?;
+        drifty_core::convs::archive(c, &id, now_ms())?;
         Ok(json!({"ok": true}))
     })
     .await
@@ -738,14 +766,14 @@ async fn conv_archive(State(app): State<App>, Path(id): Path<String>) -> ApiResu
 
 async fn conv_unarchive(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     with_conn(&app, move |c| {
-        claudius_core::convs::unarchive(c, &id)?;
+        drifty_core::convs::unarchive(c, &id)?;
         Ok(json!({"ok": true}))
     })
     .await
 }
 
 async fn repo_archived(State(app): State<App>, Path(id): Path<i64>) -> ApiResult {
-    with_conn(&app, move |c| claudius_core::convs::archived(c, id)).await
+    with_conn(&app, move |c| drifty_core::convs::archived(c, id)).await
 }
 
 async fn chat_list(State(app): State<App>) -> Json<Value> {
@@ -806,6 +834,7 @@ async fn chat_stop(State(app): State<App>, Path(id): Path<String>) -> ApiResult 
 
 async fn chat_close(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
     app.chats.remove(&id).await?;
+    app.terms.close_for_chat(&id); // ses terminaux ne lui survivent pas
     Ok(Json(json!({"ok": true})))
 }
 
@@ -859,7 +888,7 @@ async fn improve_prompt(State(app): State<App>, Json(r): Json<ImproveReq>) -> Ap
     let (i, o, cost, sid) = (out.input_tokens, out.output_tokens, out.cost_usd, r.session_id.clone());
     tokio::task::spawn_blocking(move || -> Result<()> {
         let c = conn.lock().map_err(|_| anyhow::anyhow!("The database lock cannot be taken because it is poisoned."))?;
-        claudius_core::ledger::record_spend(&c, "improve", sid.as_deref(), i, o, cost)
+        drifty_core::ledger::record_spend(&c, "improve", sid.as_deref(), i, o, cost)
     })
     .await??;
     Ok(Json(json!({"text": out.text, "input_tokens": i, "output_tokens": o, "cost_usd": cost, "ms": out.ms})))
@@ -983,13 +1012,13 @@ async fn models(State(app): State<App>, Query(q): Query<ModelsQ>) -> ApiResult {
 }
 
 async fn rules_list(State(app): State<App>, Path(id): Path<i64>) -> ApiResult {
-    with_conn(&app, move |c| claudius_core::rule_effects::list(c, id)).await
+    with_conn(&app, move |c| drifty_core::rule_effects::list(c, id)).await
 }
 
 async fn rules_remove(State(app): State<App>, Path((id, key)): Path<(i64, String)>) -> ApiResult {
     with_conn(&app, move |c| {
-        claudius_core::rule_effects::remove(c, id, &key)?;
-        claudius_core::rule_effects::list(c, id)
+        drifty_core::rule_effects::remove(c, id, &key)?;
+        drifty_core::rule_effects::list(c, id)
     })
     .await
 }
@@ -1073,8 +1102,30 @@ async fn chat_events(
     Ok(axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
+/// Flux poussé des discussions en direct : la liste complète à l'ouverture, puis à chaque
+/// changement (regroupés sur 150 ms), au lieu d'un relevé toutes les 2 s.
+async fn events(State(app): State<App>) -> axum::response::Sse<impl futures_util::Stream<Item = std::result::Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    let rx = app.chats.watch();
+    let hub = app.chats.clone();
+    let stream = futures_util::stream::unfold((rx, hub, true), |(mut rx, hub, first)| async move {
+        if !first {
+            loop {
+                match rx.recv().await {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                    Err(_) => return None,
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            while rx.try_recv().is_ok() {}
+        }
+        let ev = axum::response::sse::Event::default().event("chats").data(Value::Array(hub.list()).to_string());
+        Some((Ok(ev), (rx, hub, false)))
+    });
+    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 async fn usage(State(app): State<App>) -> ApiResult {
-    with_conn(&app, claudius_core::usage::summary).await
+    with_conn(&app, drifty_core::usage::summary).await
 }
 
 async fn delete_account(State(app): State<App>, Path(slot): Path<String>) -> ApiResult {
@@ -1088,7 +1139,7 @@ async fn delete_account(State(app): State<App>, Path(slot): Path<String>) -> Api
 async fn relay_install(State(app): State<App>, Path(slot): Path<String>) -> ApiResult {
     with_conn(&app, move |c| {
         let exe = std::env::current_exe()?;
-        let cmd = claudius_core::usage::install_relay(c, &slot, &exe)?;
+        let cmd = drifty_core::usage::install_relay(c, &slot, &exe)?;
         Ok(json!({"command": cmd}))
     })
     .await
@@ -1096,14 +1147,14 @@ async fn relay_install(State(app): State<App>, Path(slot): Path<String>) -> ApiR
 
 async fn relay_remove(State(app): State<App>, Path(slot): Path<String>) -> ApiResult {
     with_conn(&app, move |c| {
-        claudius_core::usage::remove_relay(c, &slot)?;
+        drifty_core::usage::remove_relay(c, &slot)?;
         Ok(json!({"removed": true}))
     })
     .await
 }
 
 async fn ledger(State(app): State<App>) -> ApiResult {
-    with_conn(&app, claudius_core::ledger::summary).await
+    with_conn(&app, drifty_core::ledger::summary).await
 }
 
 async fn accounts(State(app): State<App>) -> ApiResult {
@@ -1125,18 +1176,37 @@ async fn main() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("statusline") {
         std::process::exit(relay::run(&args[2..]));
     }
-    let db_path = claudius_core::db_path();
+    let addr = std::env::var("DRIFTY_ADDR").unwrap_or_else(|_| "127.0.0.1:4317".into());
+    let sync_only = args.iter().any(|a| a == "--sync-only" || a == "--ingest-only");
+    // Le port d'abord : s'il est pris, un autre démon tourne et rien ne doit être déplacé.
+    let listener = if sync_only { None } else { Some(tokio::net::TcpListener::bind(&addr).await?) };
+    if listener.is_some() {
+        // Ancien nom (Claudius) : dossier et base renommés une fois.
+        if let Err(e) = drifty_core::migrate_legacy_dir() {
+            eprintln!("DRIFTy : l'ancien dossier ~/.claudius ne peut pas être renommé : {e}");
+        }
+    }
+    let db_path = drifty_core::db_path();
     let conn = db::open(&db_path)?;
-    db::ensure_default_account(&conn, &claudius_core::home())?;
+    db::ensure_default_account(&conn, &drifty_core::home())?;
+    // Statusline rebranchée seulement en usage réel (pas avec une base de test, `DRIFTY_DB`).
+    if listener.is_some() && std::env::var_os("DRIFTY_DB").is_none() {
+        if let Ok(exe) = std::env::current_exe() {
+            match drifty_core::usage::migrate_relay_commands(&conn, &exe) {
+                Ok(n) if n > 0 => eprintln!("DRIFTy : {n} statusline(s) rebranchée(s) sur {}", exe.display()),
+                Err(e) => eprintln!("DRIFTy : statusline non rebranchée : {e}"),
+                _ => {}
+            }
+        }
+    }
 
-    if args.iter().any(|a| a == "--sync-only" || a == "--ingest-only") {
+    if sync_only {
         let mut c = conn;
-        let r = claudius_core::sync(&mut c)?;
+        let r = drifty_core::sync(&mut c)?;
         println!("{}", serde_json::to_string_pretty(&r)?);
         return Ok(());
     }
 
-    let addr = std::env::var("CLAUDIUS_ADDR").unwrap_or_else(|_| "127.0.0.1:4317".into());
     let app = App {
         chats: chat::Hub::default(),
         jobs: commands::Jobs::default(),
@@ -1144,7 +1214,12 @@ async fn main() -> Result<()> {
         read: Arc::new(Mutex::new(conn)),
         syncing: Arc::new(AtomicBool::new(false)),
         last: Arc::new(Mutex::new(None)),
-        origin: Arc::new(format!("http://{addr}")),
+        origins: Arc::new({
+            let p = port_of(&addr);
+            let mut v = vec![format!("http://{addr}"), format!("http://drifty.localhost:{p}"), format!("http://127.0.0.1:{p}"), format!("http://localhost:{p}")];
+            v.dedup();
+            v
+        }),
         terms: term::Terms::default(),
         web: web::Proxies::default(),
     };
@@ -1153,7 +1228,7 @@ async fn main() -> Result<()> {
     schedule::spawn(app.read.clone(), app.chats.clone(), resume_spec);
 
     // Aucune synchronisation automatique : elle ne part que sur demande
-    // (bouton « Synchroniser » de l'interface, ou `claudiusd --sync-only`).
+    // (bouton « Synchroniser » de l'interface, ou `driftyd --sync-only`).
 
     let router = Router::new()
         .route("/", get(index))
@@ -1195,15 +1270,20 @@ async fn main() -> Result<()> {
         .route("/api/models", get(models))
         .route("/api/commands", get(side::commands))
         .route("/api/btw", post(side::btw))
+        .route("/api/events", get(events))
         .route("/api/sessions/{id}/title", put(conv_rename))
         .route("/api/chats/{id}/title", put(chat_rename))
         .route("/api/sessions/{id}/archive", post(conv_archive).delete(conv_unarchive))
         .route("/api/repos/{id}/archived", get(repo_archived))
+        .route("/api/repos/{id}/worktrees/archive", post(worktrees::archive))
+        .route("/api/repos/{id}/worktrees/restore", post(worktrees::restore))
+        .route("/api/repos/{id}/worktrees/archived", get(worktrees::list))
         .route("/api/term", post(term::open))
         .route("/api/term/{id}", axum::routing::delete(term::close))
         .route("/api/term/{id}/ws", get(term::ws))
         .route("/api/web", post(web::open))
         .route("/api/web/default", get(web::default_url))
+        .route("/api/web/alive", post(web::alive))
         .route("/api/search", get(search))
         .route("/api/prompts", get(prompts_list).post(prompts_create))
         .route("/api/prompts/{id}", axum::routing::delete(prompts_delete))
@@ -1230,10 +1310,32 @@ async fn main() -> Result<()> {
         .route("/api/chats/{id}/queue/{qid}/now", post(chat_send_now))
         .route("/api/accounts", get(accounts).put(set_account))
         .layer(middleware::from_fn_with_state(app.clone(), same_origin))
-        .with_state(app);
+        .with_state(app.clone());
+    let (app_terms, app_web) = (app.terms.clone(), app.web.clone());
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("DRIFTy : http://{addr}  (base : {})", db_path.display());
+    // Orphelins : terminaux sans page depuis 2 min, relais sans activité depuis 3 min.
+    {
+        let (terms, web) = (app_terms, app_web);
+        tokio::spawn(async move {
+            let mut t = tokio::time::interval(std::time::Duration::from_millis(reap_ms(30_000).clamp(1_000, 30_000) as u64));
+            loop {
+                t.tick().await;
+                terms.reap();
+                web.reap();
+            }
+        });
+    }
+    let listener = listener.expect("listener bound above");
+    // `drifty.localhost` se résout d'abord en ::1 : on y écoute aussi (pas de détour par un échec).
+    if addr.starts_with("127.0.0.1:") {
+        if let Ok(l6) = tokio::net::TcpListener::bind(("::1", port_of(&addr))).await {
+            let r = router.clone();
+            tokio::spawn(async move {
+                let _ = axum::serve(l6, r).await;
+            });
+        }
+    }
+    eprintln!("DRIFTy : http://drifty.localhost:{}  (base : {})", port_of(&addr), db_path.display());
     axum::serve(listener, router).await?;
     Ok(())
 }

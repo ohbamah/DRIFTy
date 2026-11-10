@@ -1,6 +1,6 @@
 // DRIFTy pour macOS : une fenêtre native autour de l'interface servie par
-// `claudiusd`. L'app réutilise un démon qui répond déjà ; sinon elle lance
-// celui du bundle (Contents/MacOS/claudiusd) et n'arrête que celui-là.
+// `driftyd`. L'app réutilise un démon qui répond déjà ; sinon elle lance
+// celui du bundle (Contents/MacOS/driftyd) et n'arrête que celui-là.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io::{Read, Write};
@@ -62,8 +62,11 @@ const APP_JS: &str = r#"(() => {
 })();"#;
 
 fn main() {
-    let addr = std::env::var("CLAUDIUS_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.into());
-    let origin: Url = format!("http://{addr}/").parse().expect("CLAUDIUS_ADDR invalide");
+    let addr = std::env::var("DRIFTY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.into());
+    // L'interface est servie sous `drifty.localhost` (même site que les relais de l'onglet
+    // navigateur, `rN.drifty.localhost`, dont les cookies restent ainsi isolés).
+    let port = addr.rsplit(':').next().unwrap_or("4317").to_string();
+    let origin: Url = format!("http://drifty.localhost:{port}/").parse().expect("DRIFTY_ADDR invalide");
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
         if let Some(w) = app.get_webview_window("main") {
@@ -132,14 +135,17 @@ fn build_window(app: &tauri::AppHandle, origin: Url) -> tauri::Result<WebviewWin
 
 /// La page de démarrage embarquée, l'interface du démon, ou un relais de l'onglet navigateur.
 /// `on_navigation` voit aussi les navigations des CADRES : les pages de l'onglet navigateur
-/// passent par des relais du démon, sur `127.0.0.1` à un autre port ; les renvoyer au
-/// navigateur du système laissait le cadre blanc et ouvrait l'adresse du relais dehors.
+/// passent par des relais du démon, `rN.drifty.localhost` ; les renvoyer au navigateur du
+/// système laissait le cadre blanc et ouvrait l'adresse du relais dehors.
 fn is_internal(url: &Url, origin: &Url) -> bool {
     match url.scheme() {
         "tauri" | "about" | "data" | "blob" => true,
         "http" => {
-            (url.host_str() == origin.host_str() && url.port_or_known_default() == origin.port_or_known_default())
-                || url.host_str() == Some("127.0.0.1")
+            let host = url.host_str().unwrap_or("");
+            (host == origin.host_str().unwrap_or("") && url.port_or_known_default() == origin.port_or_known_default())
+                || host.ends_with(".drifty.localhost")
+                // L'adresse de bouclage redirige vers `drifty.localhost`.
+                || (host == "127.0.0.1" && url.port_or_known_default() == origin.port_or_known_default())
         }
         _ => false,
     }
@@ -206,16 +212,16 @@ fn ensure_daemon(app: &tauri::AppHandle, addr: &str) -> Result<(), String> {
         return Ok(());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bin = exe.parent().map(|d| d.join("claudiusd")).ok_or("dossier de l'exécutable introuvable")?;
+    let bin = exe.parent().map(|d| d.join("driftyd")).ok_or("dossier de l'exécutable introuvable")?;
     if !bin.exists() {
-        return Err(format!("claudiusd introuvable : {}", bin.display()));
+        return Err(format!("driftyd introuvable : {}", bin.display()));
     }
     let log = log_path();
     let out = std::fs::OpenOptions::new().create(true).append(true).open(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
 
     let mut cmd = Command::new(&bin);
-    cmd.env("CLAUDIUS_ADDR", addr).stdin(Stdio::null()).stdout(out).stderr(err);
+    cmd.env("DRIFTY_ADDR", addr).stdin(Stdio::null()).stdout(out).stderr(err);
     // Lancée depuis le Finder, l'app hérite du PATH minimal de launchd : le démon
     // n'y trouverait ni `claude`, ni `gh`, ni `git` de Homebrew.
     if let Some(path) = login_shell_path() {
@@ -227,7 +233,7 @@ fn ensure_daemon(app: &tauri::AppHandle, addr: &str) -> Result<(), String> {
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(format!("claudiusd s'est arrêté au démarrage ({status}).\n\n{}", tail(&log, 12)));
+            return Err(format!("driftyd s'est arrêté au démarrage ({status}).\n\n{}", tail(&log, 12)));
         }
         if daemon_alive(addr) {
             break;
@@ -235,7 +241,7 @@ fn ensure_daemon(app: &tauri::AppHandle, addr: &str) -> Result<(), String> {
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("claudiusd ne répond pas sur {addr} après {} s.\n\n{}", START_TIMEOUT.as_secs(), tail(&log, 12)));
+            return Err(format!("driftyd ne répond pas sur {addr} après {} s.\n\n{}", START_TIMEOUT.as_secs(), tail(&log, 12)));
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -261,7 +267,7 @@ fn stop_own_daemon(app: &tauri::AppHandle) {
 fn log_path() -> PathBuf {
     let dir = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Library/Logs/DRIFTy");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("claudiusd.log")
+    dir.join("driftyd.log")
 }
 
 fn tail(path: &std::path::Path, lines: usize) -> String {
@@ -272,7 +278,7 @@ fn tail(path: &std::path::Path, lines: usize) -> String {
 
 /// Le PATH du shell de connexion de l'utilisateur (5 s au plus).
 fn login_shell_path() -> Option<String> {
-    const MARK: &str = "__CLAUDIUS_PATH__";
+    const MARK: &str = "__DRIFTY_PATH__";
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let child = Command::new(shell)
         .args(["-ilc", &format!("printf '\\n{MARK}%s\\n' \"$PATH\"")])

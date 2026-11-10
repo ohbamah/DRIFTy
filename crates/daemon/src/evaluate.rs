@@ -17,8 +17,8 @@ façon de formuler les demandes, organisation en worktrees ou sous-agents, choix
 
 /// Le résumé envoyé à l'agent : compact, sans le texte des messages.
 fn brief(conn: &Connection, sid: &str) -> Result<(String, Option<String>)> {
-    let d = claudius_core::digest::digest(conn, sid)?;
-    let s = claudius_core::query::session(conn, sid)?;
+    let d = drifty_core::digest::digest(conn, sid)?;
+    let s = drifty_core::query::session(conn, sid)?;
     let mut out = format!(
         "Conversation : {}\nCoût : {}\nAppels au modèle : {}, appels d'outil : {}, échecs évitables : {}, sous-agents : {}, compactions : {}, interruptions : {}\n\
          Contexte : départ {} tokens, max {} tokens, cache {:.1} %\nTemps : modèle {} s, outils {} s, attente utilisateur {} s\n\nCauses :\n",
@@ -45,7 +45,7 @@ fn brief(conn: &Connection, sid: &str) -> Result<(String, Option<String>)> {
     }
     // Règles déjà en place dans le CLAUDE.md du projet (pour ne pas les reproposer).
     if let Some(repo) = s["repo_id"].as_i64() {
-        if let Ok(rules) = claudius_core::rule_effects::list(conn, repo) {
+        if let Ok(rules) = drifty_core::rule_effects::list(conn, repo) {
             let texts: Vec<&str> = rules["rules"].as_array().into_iter().flatten().filter_map(|r| r["rule"].as_str()).collect();
             if !texts.is_empty() {
                 out += &format!("\nRègles déjà dans le CLAUDE.md :\n- {}\n", texts.join("\n- "));
@@ -53,7 +53,7 @@ fn brief(conn: &Connection, sid: &str) -> Result<(String, Option<String>)> {
         }
     }
     let slot = s["slot"].as_str().map(str::to_string);
-    let dir = claudius_core::repos::account_dir(conn, slot.as_deref())?;
+    let dir = drifty_core::repos::account_dir(conn, slot.as_deref())?;
     Ok((out, dir))
 }
 
@@ -62,7 +62,7 @@ pub fn prepare(conn: &Connection, sid: &str) -> Result<(String, Option<String>)>
 }
 
 pub async fn run(prompt: &str, config_dir: Option<&str>) -> Result<improve::Improved> {
-    let model = std::env::var("CLAUDIUS_EVAL_MODEL").unwrap_or_else(|_| "sonnet".into());
+    let model = std::env::var("DRIFTY_EVAL_MODEL").unwrap_or_else(|_| "sonnet".into());
     improve::oneshot(SYSTEM, prompt, config_dir, &model, "The conversation cannot be evaluated").await
 }
 
@@ -72,7 +72,7 @@ pub fn save(conn: &Connection, sid: &str, r: &improve::Improved) -> Result<Value
         "INSERT INTO evaluations(session_id, ts, report, input_tokens, output_tokens, cost_usd) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![sid, now, r.text, r.input_tokens, r.output_tokens, r.cost_usd],
     )?;
-    claudius_core::ledger::record_spend(conn, "evaluate", Some(sid), r.input_tokens, r.output_tokens, r.cost_usd)?;
+    drifty_core::ledger::record_spend(conn, "evaluate", Some(sid), r.input_tokens, r.output_tokens, r.cost_usd)?;
     latest(conn, sid)
 }
 

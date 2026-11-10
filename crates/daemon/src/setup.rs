@@ -9,15 +9,15 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::{commands, improve, repos, with_conn, ApiResult, App};
-use claudius_core::db;
+use drifty_core::db;
 
 pub const SYSTEM: &str = "On te donne le résumé d'un dépôt de code et la liste des fichiers ignorés par git présents dans son \
 dossier principal. Écris le script bash lancé dans un NOUVEAU worktree git de ce dépôt pour le rendre prêt à travailler : \
-copier depuis le dossier principal ($CLAUDIUS_ROOT_PATH) les fichiers non versionnés nécessaires (.env, clés, config locale), \
+copier depuis le dossier principal ($DRIFTY_ROOT_PATH) les fichiers non versionnés nécessaires (.env, clés, config locale), \
 installer les dépendances (bundle install, npm ci, uv sync…), préparer ce qui doit l'être. Jamais de serveur lancé, rien \
 d'interactif, rien d'écrit hors du worktree. Le script est exécuté par `bash -e` dans le worktree ; protège les copies \
-facultatives (`[ -f \"$CLAUDIUS_ROOT_PATH/.env\" ] && cp …`). Variables : $CLAUDIUS_ROOT_PATH (dossier principal), \
-$CLAUDIUS_WORKSPACE_NAME (nom du worktree), $PORT (port du worktree). Si un conductor.json existe, reprends son script \
+facultatives (`[ -f \"$DRIFTY_ROOT_PATH/.env\" ] && cp …`). Variables : $DRIFTY_ROOT_PATH (dossier principal), \
+$DRIFTY_WORKSPACE_NAME (nom du worktree), $PORT (port du worktree). Si un conductor.json existe, reprends son script \
 setup. Script court, commenté, sans rien d'inutile ; vide si rien n'est nécessaire. Réponds UNIQUEMENT par un objet JSON : \
 {\"script\": \"...\", \"why\": \"une phrase\"}.";
 
@@ -59,13 +59,13 @@ fn parse(text: &str) -> Result<Value> {
 
 /// Démarre le script d'un worktree tout neuf ; rend l'identifiant de l'exécution.
 pub fn start(app: &App, repo_root: &str, cwd: &str, worktree: &str, script: &str, env: &[(String, String)]) -> Result<String> {
-    let dir = claudius_core::home().join(".claudius").join("setup");
+    let dir = drifty_core::home().join(".drifty").join("setup");
     std::fs::create_dir_all(&dir)?;
     let file = dir.join(format!("{}.sh", worktree.replace(['/', ' '], "_")));
     std::fs::write(&file, script)?;
     let mut env = env.to_vec();
     let port = env.iter().find(|(k, _)| k == "PORT").map(|(_, v)| v.clone()).unwrap_or_default();
-    for (k, v) in [("CLAUDIUS_ROOT_PATH", repo_root), ("CLAUDIUS_WORKSPACE_NAME", worktree)] {
+    for (k, v) in [("DRIFTY_ROOT_PATH", repo_root), ("DRIFTY_WORKSPACE_NAME", worktree)] {
         env.push((k.into(), v.into()));
     }
     // Les scripts écrits pour Conductor marchent tels quels.
@@ -101,13 +101,13 @@ pub async fn route_analyze(State(app): State<App>, Path(id): Path<i64>) -> ApiRe
     })
     .await?
     .0;
-    let model = std::env::var("CLAUDIUS_IMPROVE_MODEL").unwrap_or_else(|_| "sonnet".into());
+    let model = std::env::var("DRIFTY_IMPROVE_MODEL").unwrap_or_else(|_| "sonnet".into());
     let r = improve::oneshot(SYSTEM, v[0].as_str().unwrap_or(""), v[1].as_str(), &model, "The setup script cannot be proposed").await?;
     let found = parse(&r.text)?;
     let (i, o, cost) = (r.input_tokens, r.output_tokens, r.cost_usd);
     let keep = found.clone();
     let _ = with_conn(&app, move |c| {
-        claudius_core::ledger::record_spend(c, "setup-analysis", None, i, o, cost)?;
+        drifty_core::ledger::record_spend(c, "setup-analysis", None, i, o, cost)?;
         let mut cur = get(c, id)?;
         cur["proposal"] = keep;
         db::set_setting(c, &format!("setup:{id}"), &cur.to_string())?;

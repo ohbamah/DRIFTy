@@ -48,12 +48,12 @@ export function setRepos(repos) {
   notify();
 }
 
-// Discussions en direct : relues toutes les 2 s, signalées seulement si quelque chose change.
-const sig = (l) => JSON.stringify(l.map((c) => [c.id, c.status, c.unread, c.pending, c.session_id, c.model]));
-setInterval(async () => {
-  if (document.hidden) return;
-  const chats = await api("/api/chats").catch(() => null);
+// Discussions en direct : poussées par le serveur (flux /api/events) à chaque changement ;
+// signalées seulement si ce que la barre affiche change. Le navigateur se reconnecte seul.
+const sig = (l) => JSON.stringify(l.map((c) => [c.id, c.name, c.status, c.unread, c.pending, c.session_id, c.model, c.cost_usd, c.tokens_total, c.queue?.length]));
+const take = (chats) => {
   if (!chats || sig(chats) === sig(store.chats)) return;
   store.chats = chats;
   notify();
-}, 2000);
+};
+new EventSource("/api/events").addEventListener("chats", (e) => { try { take(JSON.parse(e.data)); } catch {} });

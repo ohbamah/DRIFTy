@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -29,7 +29,19 @@ pub struct Term {
     replay: Mutex<Vec<u8>>,
     tx: broadcast::Sender<Vec<u8>>,
     done: AtomicBool,
+    /// Discussion en direct à laquelle il appartient (fermé avec elle).
+    chat: Option<String>,
+    /// Pages connectées, et depuis quand il n'y en a plus (ms ; 0 = jamais seul).
+    clients: AtomicUsize,
+    alone_since: AtomicI64,
 }
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Un terminal sans page connectée depuis ce délai est fermé (onglet perdu au rechargement).
+const ALONE_MS: i64 = 120_000;
 
 #[derive(Default, Clone)]
 pub struct Terms(Arc<Mutex<HashMap<String, Arc<Term>>>>);
@@ -39,7 +51,7 @@ impl Terms {
         self.0.lock().unwrap().get(id).cloned().ok_or_else(|| anyhow::anyhow!("The terminal `{id}` cannot be found because it was closed."))
     }
 
-    pub fn open(&self, dir: &str, env: &[(String, String)], cols: u16, rows: u16) -> Result<String> {
+    pub fn open(&self, dir: &str, env: &[(String, String)], cols: u16, rows: u16, chat: Option<String>) -> Result<String> {
         if !std::path::Path::new(dir).is_dir() {
             anyhow::bail!("The terminal cannot open because the folder `{dir}` no longer exists.");
         }
@@ -66,10 +78,14 @@ impl Terms {
             replay: Mutex::new(Vec::new()),
             tx,
             done: AtomicBool::new(false),
+            chat,
+            clients: AtomicUsize::new(0),
+            alone_since: AtomicI64::new(now_ms()),
         });
         let id = format!("t{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
         self.0.lock().unwrap().insert(id.clone(), term.clone());
         // Lecture bloquante du pseudo-terminal, dans son propre fil.
+        let (map, tid) = (self.0.clone(), id.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 16 * 1024];
             loop {
@@ -91,13 +107,39 @@ impl Terms {
             }
             term.done.store(true, Ordering::SeqCst);
             let _ = term.tx.send(Vec::new()); // fin : les pages ferment leur connexion
+            map.lock().unwrap().remove(&tid); // shell terminé : il quitte le registre
         });
         Ok(id)
     }
 
     pub fn close(&self, id: &str) {
-        if let Some(t) = self.0.lock().unwrap().remove(id) {
+        let t = self.0.lock().unwrap().remove(id);
+        if let Some(t) = t {
             let _ = t.child.lock().unwrap().kill();
+        }
+    }
+
+    /// Les terminaux d'une discussion qu'on ferme.
+    pub fn close_for_chat(&self, chat: &str) {
+        let ids: Vec<String> = self.0.lock().unwrap().iter().filter(|(_, t)| t.chat.as_deref() == Some(chat)).map(|(k, _)| k.clone()).collect();
+        for id in ids {
+            self.close(&id);
+        }
+    }
+
+    /// Ferme les terminaux restés sans page trop longtemps.
+    pub fn reap(&self) {
+        let now = now_ms();
+        let ids: Vec<String> = self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, t)| t.clients.load(Ordering::SeqCst) == 0 && now - t.alone_since.load(Ordering::SeqCst) > crate::reap_ms(ALONE_MS))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in ids {
+            self.close(&id);
         }
     }
 }
@@ -135,7 +177,7 @@ fn rows() -> u16 {
 pub async fn open(State(app): State<App>, Json(r): Json<OpenReq>) -> ApiResult {
     let (dir, _) = review_dir(&app, &ReviewTarget { chat: r.chat.clone(), session: r.session.clone(), message: None }).await?;
     let (env, port) = worktree_env(&app, r.chat.as_deref(), &dir).await?;
-    let id = app.terms.open(&dir, &env, r.cols, r.rows)?;
+    let id = app.terms.open(&dir, &env, r.cols, r.rows, r.chat.clone())?;
     Ok(Json(json!({"id": id, "cwd": dir, "port": port})))
 }
 
@@ -147,14 +189,22 @@ pub async fn close(State(app): State<App>, Path(id): Path<String>) -> ApiResult 
 /// Connexion de la page. Un WebSocket n'est pas soumis aux règles d'origine du navigateur :
 /// l'origine est vérifiée ici, sinon n'importe quel site ouvert pourrait taper dans le shell.
 pub async fn ws(State(app): State<App>, Path(id): Path<String>, headers: HeaderMap, up: WebSocketUpgrade) -> Response {
-    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(app.origin.as_str()) {
+    if !app.trusted(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())) {
         return (StatusCode::FORBIDDEN, "The terminal cannot be reached from another origin.").into_response();
     }
     let Ok(term) = app.terms.get(&id) else { return (StatusCode::NOT_FOUND, "The terminal was closed.").into_response() };
     up.on_upgrade(move |socket| pump(socket, term))
 }
 
-async fn pump(mut socket: WebSocket, term: Arc<Term>) {
+async fn pump(socket: WebSocket, term: Arc<Term>) {
+    term.clients.fetch_add(1, Ordering::SeqCst);
+    pump_inner(socket, &term).await;
+    if term.clients.fetch_sub(1, Ordering::SeqCst) == 1 {
+        term.alone_since.store(now_ms(), Ordering::SeqCst);
+    }
+}
+
+async fn pump_inner(mut socket: WebSocket, term: &Term) {
     let mut rx = term.tx.subscribe();
     let replay = term.replay.lock().unwrap().clone();
     if !replay.is_empty() && socket.send(Message::Binary(replay.into())).await.is_err() {

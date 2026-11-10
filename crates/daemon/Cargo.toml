@@ -1,14 +1,14 @@
 [package]
-name = "claudius-daemon"
+name = "drifty-daemon"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "claudiusd"
+name = "driftyd"
 path = "src/main.rs"
 
 [dependencies]
-claudius-core = { path = "../core" }
+drifty-core = { path = "../core" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

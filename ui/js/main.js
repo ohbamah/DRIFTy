@@ -9,6 +9,7 @@ import { mountSidebar } from "./sidebar.js";
 import { reload } from "./store.js";
 import { startNotifications } from "./notify.js";
 import { autoSelects } from "./select.js";
+import { startKeys } from "./keys.js";
 
 const view = $("#view");
 $("#sb-reopen").innerHTML = icon("sidebar");
@@ -68,3 +69,4 @@ document.addEventListener("click", async (e) => {
 mountSidebar($("#sidebar")).then(route);
 startNotifications();
 autoSelects(document.body); // menus déroulants maison partout
+startKeys();

@@ -4,7 +4,7 @@ import { bars } from "../chart.js";
 import { slide, moveTo } from "../slide.js";
 
 const f = { days: "30", slot: "" };
-try { Object.assign(f, JSON.parse(localStorage.getItem("claudius.analytics") || "{}")); } catch {}
+try { Object.assign(f, JSON.parse(localStorage.getItem("drifty.analytics") || "{}")); } catch {}
 
 const seg = (name, opts, cur) =>
   `<div class="seg" data-seg="${name}">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${v === cur ? "on" : ""}">${l}</button>`).join("")}</div>`;
@@ -61,7 +61,7 @@ export async function render(root) {
   root.querySelectorAll("[data-seg] button").forEach((b) => b.addEventListener("click", () => {
     if (b.classList.contains("on")) return;
     f[b.closest("[data-seg]").dataset.seg] = b.dataset.v;
-    try { localStorage.setItem("claudius.analytics", JSON.stringify(f)); } catch {}
+    try { localStorage.setItem("drifty.analytics", JSON.stringify(f)); } catch {}
     moveTo(b);
     render(root);
   }));

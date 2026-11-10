@@ -1,5 +1,5 @@
 //! Sons personnalisés des notifications : fichiers audio ajoutés par l'utilisateur,
-//! rangés dans `~/.claudius/sounds/`, indexés dans les réglages (clé `sounds`).
+//! rangés dans `~/.drifty/sounds/`, indexés dans les réglages (clé `sounds`).
 
 use anyhow::{bail, Result};
 use axum::body::Bytes;
@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{with_conn, ApiError, ApiResult, App};
-use claudius_core::db;
+use drifty_core::db;
 
 pub const MAX_BYTES: usize = 5 * 1024 * 1024;
 const TYPES: [(&str, &str); 10] = [
@@ -20,7 +20,7 @@ const TYPES: [(&str, &str); 10] = [
 ];
 
 fn dir() -> std::path::PathBuf {
-    claudius_core::home().join(".claudius").join("sounds")
+    drifty_core::home().join(".drifty").join("sounds")
 }
 
 pub fn list(c: &Connection) -> Result<Vec<Value>> {

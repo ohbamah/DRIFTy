@@ -13,8 +13,22 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const START: &str = "<!-- claudius:start -->";
-const END: &str = "<!-- claudius:end -->";
+const START: &str = "<!-- drifty:start -->";
+const END: &str = "<!-- drifty:end -->";
+/// Marqueurs écrits par l'ancien nom (Claudius) : lus comme les nouveaux, remplacés à la réécriture.
+const LEGACY: [(&str, &str); 1] = [("<!-- claudius:start -->", "<!-- claudius:end -->")];
+
+fn normalized(text: &str) -> std::borrow::Cow<'_, str> {
+    if LEGACY.iter().any(|(a, _)| text.contains(a)) {
+        let mut t = text.to_string();
+        for (a, z) in LEGACY {
+            t = t.replace(a, START).replace(z, END);
+        }
+        std::borrow::Cow::Owned(t)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
 const HEADING: &str = "## Règles ajoutées par DRIFTy";
 /// Exemples gardés au plus par règle (les plus récents d'abord).
 const MAX_ITEMS: usize = 5;
@@ -203,6 +217,7 @@ fn backticked(s: &str) -> Vec<String> {
 }
 
 fn parse_block(text: &str) -> Block {
+    let text = &*normalized(text);
     let mut b = Block { rules: BTreeMap::new(), foreign: vec![] };
     let (Some(a), Some(z)) = (text.find(START), text.find(END)) else { return b };
     for line in text[a..z].lines().filter_map(|l| l.strip_prefix("- ")) {
@@ -322,6 +337,7 @@ pub fn propose(conn: &Connection, sid: &str, cause_id: &str) -> Result<Value> {
 /// Réécrit le bloc DRIFTy du texte (un seul point d'écriture) : une ligne par règle,
 /// dans l'ordre du catalogue, puis les lignes écrites à la main. Le reste du fichier ne bouge pas.
 fn rewrite(text: &str, block: &Block) -> String {
+    let text = &*normalized(text);
     let mut body = String::new();
     for k in CATALOGUE.iter().filter(|k| block.rules.contains_key(k.key)) {
         body += &line(k.key, &block.rules[k.key]);

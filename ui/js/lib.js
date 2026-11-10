@@ -88,14 +88,14 @@ export function lightbox(src) {
 
 /** Thème : `system` (réglage du Mac), `light` ou `dark`. Gardé dans ce navigateur. */
 export function getTheme() {
-  try { return localStorage.getItem("claudius.theme") || "system"; } catch { return "system"; }
+  try { return localStorage.getItem("drifty.theme") || "system"; } catch { return "system"; }
 }
 export function setTheme(t) {
   document.documentElement.classList.add("theme-fade");
   setTimeout(() => document.documentElement.classList.remove("theme-fade"), 300);
   if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
   else delete document.documentElement.dataset.theme;
-  try { t === "system" ? localStorage.removeItem("claudius.theme") : localStorage.setItem("claudius.theme", t); } catch {}
+  try { t === "system" ? localStorage.removeItem("drifty.theme") : localStorage.setItem("drifty.theme", t); } catch {}
 }
 
 /** Loader circulaire qui remplace un contenu en cours de chargement. */

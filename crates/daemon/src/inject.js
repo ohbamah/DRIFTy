@@ -11,7 +11,7 @@
     try { const x = new URL(u, location.href); return x.origin === R ? T + x.pathname + x.search + x.hash : x.href; } catch { return String(u); }
   };
   const send = (m) => parent.postMessage(Object.assign({ drifty: 1 }, m), "*");
-  const nav = () => send({ type: "nav", url: real(location.href), title: document.title });
+  const nav = () => send({ type: "nav", url: real(location.href), title: document.title, relay: R });
   addEventListener("load", nav);
   addEventListener("popstate", nav);
   for (const k of ["pushState", "replaceState"]) {

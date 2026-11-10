@@ -23,9 +23,9 @@ pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// `$CLAUDIUS_DB`, sinon `~/.claudius/claudius.db`.
+/// `$DRIFTY_DB`, sinon `~/.drifty/drifty.db`.
 pub fn db_path() -> PathBuf {
-    std::env::var_os("CLAUDIUS_DB").map(PathBuf::from).unwrap_or_else(|| home().join(".claudius").join("claudius.db"))
+    std::env::var_os("DRIFTY_DB").map(PathBuf::from).unwrap_or_else(|| home().join(".drifty").join("drifty.db"))
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -45,4 +45,23 @@ pub fn sync(conn: &mut rusqlite::Connection) -> anyhow::Result<SyncReport> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     db::set_setting(conn, "last_sync_at", &now.to_string())?;
     Ok(SyncReport { ingest, new_folders, analysed_sessions, millis: start.elapsed().as_millis() })
+}
+
+/// Ancien nom (Claudius) : `~/.claudius/claudius.db` devient `~/.drifty/drifty.db`, une fois.
+/// À appeler quand l'ancien démon ne peut plus tourner (port déjà pris par le nouveau).
+pub fn migrate_legacy_dir() -> std::io::Result<()> {
+    if std::env::var_os("DRIFTY_DB").is_some() {
+        return Ok(());
+    }
+    let (old, new) = (home().join(".claudius"), home().join(".drifty"));
+    if old.is_dir() && !new.exists() {
+        std::fs::rename(&old, &new)?;
+    }
+    for ext in ["", "-wal", "-shm"] {
+        let (a, b) = (new.join(format!("claudius.db{ext}")), new.join(format!("drifty.db{ext}")));
+        if a.exists() && !b.exists() {
+            std::fs::rename(a, b)?;
+        }
+    }
+    Ok(())
 }

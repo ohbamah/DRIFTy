@@ -26,7 +26,7 @@
       "icons/icon.icns",
       "icons/icon.png"
     ],
-    "externalBin": ["binaries/claudiusd"],
+    "externalBin": ["binaries/driftyd"],
     "macOS": {
       "minimumSystemVersion": "11.0"
     }
