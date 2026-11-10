@@ -159,7 +159,7 @@ fn open_external(app: &tauri::AppHandle, url: &Url) {
 
 fn show_error(window: &WebviewWindow, msg: &str) {
     let js = format!(
-        "document.getElementById('msg').textContent = 'Le démon n’a pas pu démarrer.';\
+        "document.getElementById('msg').textContent = 'DRIFTy n’a pas pu démarrer.';\
          const e = document.getElementById('err'); e.hidden = false; e.textContent = {};",
         js_string(msg)
     );

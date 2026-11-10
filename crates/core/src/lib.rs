@@ -47,20 +47,59 @@ pub fn sync(conn: &mut rusqlite::Connection) -> anyhow::Result<SyncReport> {
     Ok(SyncReport { ingest, new_folders, analysed_sessions, millis: start.elapsed().as_millis() })
 }
 
-/// Ancien nom (Claudius) : `~/.claudius/claudius.db` devient `~/.drifty/drifty.db`, une fois.
+/// Ancien nom (Claudius) : `~/.claudius` passe dans `~/.drifty` (base `drifty.db`).
 /// À appeler quand l'ancien démon ne peut plus tourner (port déjà pris par le nouveau).
+/// `~/.drifty` peut déjà exister (dossier de travail créé avant) : on FUSIONNE, et une
+/// base `drifty.db` sans aucune conversation cède la place à l'ancienne (gardée de côté).
 pub fn migrate_legacy_dir() -> std::io::Result<()> {
     if std::env::var_os("DRIFTY_DB").is_some() {
         return Ok(());
     }
     let (old, new) = (home().join(".claudius"), home().join(".drifty"));
-    if old.is_dir() && !new.exists() {
-        std::fs::rename(&old, &new)?;
+    if !old.is_dir() {
+        return Ok(());
     }
-    for ext in ["", "-wal", "-shm"] {
-        let (a, b) = (new.join(format!("claudius.db{ext}")), new.join(format!("drifty.db{ext}")));
-        if a.exists() && !b.exists() {
-            std::fs::rename(a, b)?;
+    std::fs::create_dir_all(&new)?;
+    let old_db = old.join("claudius.db");
+    let new_db = new.join("drifty.db");
+    if old_db.exists() {
+        if new_db.exists() && !db_is_empty(&new_db) {
+            eprintln!("DRIFTy : {} contient déjà des conversations ; {} n'est pas repris.", new_db.display(), old_db.display());
+        } else {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            for ext in ["", "-wal", "-shm"] {
+                let fresh = new.join(format!("drifty.db{ext}"));
+                if fresh.exists() {
+                    std::fs::rename(&fresh, new.join(format!("drifty.db.vide-{stamp}{ext}")))?;
+                }
+                let legacy = old.join(format!("claudius.db{ext}"));
+                if legacy.exists() {
+                    std::fs::rename(legacy, fresh)?;
+                }
+            }
+        }
+    }
+    merge_dir(&old, &new)?;
+    let _ = std::fs::remove_dir(&old); // seulement s'il est vide
+    Ok(())
+}
+
+/// Une base sans aucune conversation (créée au démarrage, avant la migration).
+fn db_is_empty(path: &std::path::Path) -> bool {
+    rusqlite::Connection::open(path)
+        .and_then(|c| c.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0)))
+        .map_or(true, |n| n == 0)
+}
+
+/// Déplace dans `to` ce qui n'y est pas encore (récursif) ; ce qui existe des deux côtés reste.
+fn merge_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    for e in std::fs::read_dir(from)?.flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if !dst.exists() {
+            std::fs::rename(&src, &dst)?;
+        } else if src.is_dir() && dst.is_dir() {
+            merge_dir(&src, &dst)?;
+            let _ = std::fs::remove_dir(&src);
         }
     }
     Ok(())
