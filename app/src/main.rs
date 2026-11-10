@@ -61,7 +61,27 @@ const APP_JS: &str = r#"(() => {
   });
 })();"#;
 
+/// Journal de l'app (`~/Library/Logs/DRIFTy/app.log`) : sa sortie d'erreur (Tauri, WebKit)
+/// et toute panique, avec l'heure. Sans lui, un arrêt de l'app ne laisse aucune trace.
+fn start_app_log() {
+    let path = log_path().with_file_name("app.log");
+    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::os::unix::io::AsRawFd;
+        // La sortie d'erreur du processus va dans le journal (et y reste : `f` est oublié exprès).
+        unsafe { libc::dup2(f.as_raw_fd(), 2) };
+        std::mem::forget(f);
+    }
+    let stamp = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    eprintln!("[{}] DRIFTy démarre (PID {})", stamp(), std::process::id());
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("[{}] PANIQUE : {info}", stamp());
+        default(info);
+    }));
+}
+
 fn main() {
+    start_app_log();
     let addr = std::env::var("DRIFTY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.into());
     // L'interface est servie sous `drifty.localhost` (même site que les relais de l'onglet
     // navigateur, `rN.drifty.localhost`, dont les cookies restent ainsi isolés).

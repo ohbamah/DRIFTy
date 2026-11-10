@@ -327,6 +327,10 @@ struct ChatText {
 struct ChatDecision {
     request_id: String,
     allow: bool,
+    /// Réponses à des questions (`AskUserQuestion`) : question → choix.
+    answers: Option<Value>,
+    /// Motif d'un refus, lu par Claude.
+    message: Option<String>,
 }
 
 /// Prépare le lancement (base + git), sans rien démarrer.
@@ -820,13 +824,18 @@ async fn chat_start(State(app): State<App>, Json(r): Json<NewChat>) -> ApiResult
     Ok(Json(chat.summary()))
 }
 
+async fn chat_bash(State(app): State<App>, Path(id): Path<String>, Json(t): Json<ChatText>) -> ApiResult {
+    app.chats.get(&id)?.bash(&t.text).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn chat_send(State(app): State<App>, Path(id): Path<String>, Json(t): Json<ChatText>) -> ApiResult {
     app.chats.get(&id)?.send(&t.text, t.images).await?;
     Ok(Json(json!({"ok": true})))
 }
 
 async fn chat_decide(State(app): State<App>, Path(id): Path<String>, Json(d): Json<ChatDecision>) -> ApiResult {
-    app.chats.get(&id)?.decide(&d.request_id, d.allow).await?;
+    app.chats.get(&id)?.decide(&d.request_id, d.allow, d.answers, d.message).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1294,6 +1303,7 @@ async fn main() -> Result<()> {
         .route("/api/chats/{id}", get(chat_info).delete(chat_close))
         .route("/api/chats/{id}/events", get(chat_events))
         .route("/api/chats/{id}/send", post(chat_send))
+        .route("/api/chats/{id}/bash", post(chat_bash))
         .route("/api/chats/{id}/permission", post(chat_decide))
         .route("/api/chats/{id}/stop", post(chat_stop))
         .route("/api/chats/{id}/model", post(chat_set_model))

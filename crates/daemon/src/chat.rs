@@ -60,6 +60,9 @@ struct State {
     /// Messages écrits pendant que Claude travaille : envoyés un par un quand il a fini,
     /// récupérables tant qu'ils n'ont pas été transmis (comme dans le terminal).
     queue: Vec<(String, String, Vec<Image>)>,
+    /// Commandes `!` lancées depuis le dernier message (entrée et sorties, au format de Claude
+    /// Code) : jointes au début du prochain message transmis, comme dans le terminal.
+    bash_context: Vec<String>,
     /// Images jointes, servies par numéro (les événements n'en portent que l'indice).
     images: Vec<Image>,
     /// Fin du dernier tour de Claude, et dernière consultation dans l'interface (ms).
@@ -162,6 +165,24 @@ impl Default for Hub {
     }
 }
 
+/// Délai et taille maximale (par flux, la fin est gardée) d'une commande `!`.
+const BASH_TIMEOUT_S: u64 = 120;
+const BASH_MAX_CHARS: usize = 30_000;
+
+/// Les `n` derniers caractères de `s` (précédés de « … » s'il a fallu couper).
+fn tail_chars(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    if count <= n {
+        return s.to_string();
+    }
+    format!("…{}", s.chars().skip(count - n).collect::<String>())
+}
+
+/// Résultat sans aucun tour de Claude (commande locale, reprise) : 0 tour, ou 0 s et 0 token écrit.
+fn is_noop_result(ev: &Value) -> bool {
+    ev["num_turns"] == 0 || (ev["duration_ms"].as_i64().unwrap_or(0) == 0 && ev.pointer("/usage/output_tokens").and_then(Value::as_i64).unwrap_or(0) == 0)
+}
+
 /// Montant en dollars à la française : « 12,40 $ » (« < 0,01 $ » pour les poussières).
 fn fr_usd(x: f64) -> String {
     if x > 0.0 && x < 0.005 { "< 0,01 $".into() } else { format!("{x:.2} $").replace('.', ",") }
@@ -213,7 +234,8 @@ impl Chat {
         json!({
             "id": self.id, "repo_id": self.repo_id, "name": *self.title.lock().unwrap(), "cwd": self.cwd, "slot": self.slot,
             "bypass": self.bypass, "worktree": self.worktree, "created": self.created, "resume_of": self.resume_of, "setup_job": self.setup_job,
-            "session_id": st.session_id, "status": st.status, "pending": st.pending.len(), "cost_usd": st.cost_usd, "tokens_total": st.tokens, "model": st.model,
+            "session_id": st.session_id, "status": st.status, "pending": st.pending.len(),
+            "questions": st.pending.values().filter(|r| r["tool_name"] == "AskUserQuestion").count(), "cost_usd": st.cost_usd, "tokens_total": st.tokens, "model": st.model,
             "unread": unread(st.status, st.finished_at, st.seen_at),
             "queue": st.queue.iter().map(|(id, text, _)| json!({"id": id, "text": text})).collect::<Vec<_>>(),
         })
@@ -267,15 +289,18 @@ impl Chat {
     }
 
     async fn transmit(&self, text: &str, images: Vec<Image>) -> Result<()> {
-        // Images d'abord, puis le texte (comme quand on colle une image dans Claude Code).
-        let mut content: Vec<Value> = images
-            .iter()
-            .map(|i| json!({"type": "image", "source": {"type": "base64", "media_type": i.media_type, "data": i.data}}))
-            .collect();
+        // Commandes `!` d'abord (Claude les lit avant la demande), puis les images, puis le texte
+        // (comme quand on colle une image dans Claude Code).
+        let bash = std::mem::take(&mut self.state.lock().unwrap().bash_context);
+        let mut content: Vec<Value> = bash.iter().map(|b| json!({"type": "text", "text": b})).collect();
+        content.extend(images.iter().map(|i| json!({"type": "image", "source": {"type": "base64", "media_type": i.media_type, "data": i.data}})));
         if !text.trim().is_empty() {
             content.push(json!({"type": "text", "text": text}));
         }
-        self.write(&json!({"type": "user", "message": {"role": "user", "content": content}})).await?;
+        if let Err(e) = self.write(&json!({"type": "user", "message": {"role": "user", "content": content}})).await {
+            self.state.lock().unwrap().bash_context.splice(0..0, bash); // rien n'est perdu
+            return Err(e);
+        }
         let refs: Vec<usize> = {
             let mut st = self.state.lock().unwrap();
             let start = st.images.len();
@@ -284,6 +309,34 @@ impl Chat {
         };
         self.emit(json!({"type": "drifty", "kind": "user_sent", "text": text, "images": refs, "ts": now_ms()}));
         self.set_status("working");
+        Ok(())
+    }
+
+    /// Commande `!` (mode bash du terminal) : lancée dans le dossier de la discussion par le
+    /// shell de l'utilisateur, sa sortie s'affiche dans le fil et part avec le prochain message.
+    pub async fn bash(&self, command: &str) -> Result<()> {
+        let command = command.trim();
+        if command.is_empty() {
+            anyhow::bail!("The command cannot run because it is empty.");
+        }
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let started = now_ms();
+        let run = Command::new(&shell)
+            .args(["-lc", command])
+            .current_dir(&self.cwd)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let (stdout, stderr, code) = match tokio::time::timeout(std::time::Duration::from_secs(BASH_TIMEOUT_S), run).await {
+            Ok(Ok(o)) => (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned(), o.status.code()),
+            Ok(Err(e)) => (String::new(), format!("{shell}: {e}"), None),
+            Err(_) => (String::new(), format!("Command stopped after {BASH_TIMEOUT_S} s."), None),
+        };
+        let (stdout, stderr) = (tail_chars(stdout.trim_end(), BASH_MAX_CHARS), tail_chars(stderr.trim_end(), BASH_MAX_CHARS));
+        self.state.lock().unwrap().bash_context.push(format!(
+            "<bash-input>{command}</bash-input>\n<bash-stdout>{stdout}</bash-stdout><bash-stderr>{stderr}</bash-stderr>"
+        ));
+        self.emit(json!({"type": "drifty", "kind": "bash", "command": command, "stdout": stdout, "stderr": stderr, "code": code, "ms": now_ms() - started}));
         Ok(())
     }
 
@@ -347,7 +400,10 @@ impl Chat {
         }
     }
 
-    pub async fn decide(&self, request_id: &str, allow: bool) -> Result<()> {
+    /// Réponse à une demande : autorisation, ou réponses à des questions (`AskUserQuestion` :
+    /// `answers` = question → choix, ajoutées à l'entrée de l'outil comme le fait le terminal).
+    /// `message` : motif d'un refus (« en discuter », « annulé »).
+    pub async fn decide(&self, request_id: &str, allow: bool, answers: Option<Value>, message: Option<String>) -> Result<()> {
         let req = self
             .state
             .lock()
@@ -356,13 +412,17 @@ impl Chat {
             .remove(request_id)
             .ok_or_else(|| anyhow::anyhow!("The permission `{request_id}` cannot be answered because it is no longer pending."))?;
         let response = if allow {
-            json!({"behavior": "allow", "updatedInput": req["input"].clone()})
+            let mut input = req["input"].clone();
+            if let (Some(a), Some(obj)) = (&answers, input.as_object_mut()) {
+                obj.insert("answers".into(), a.clone());
+            }
+            json!({"behavior": "allow", "updatedInput": input})
         } else {
-            json!({"behavior": "deny", "message": "Refusé depuis DRIFTy."})
+            json!({"behavior": "deny", "message": message.clone().unwrap_or_else(|| "Refusé depuis DRIFTy.".into())})
         };
         self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}}))
             .await?;
-        self.emit(json!({"type": "drifty", "kind": "permission_resolved", "request_id": request_id, "allow": allow}));
+        self.emit(json!({"type": "drifty", "kind": "permission_resolved", "request_id": request_id, "allow": allow, "answers": answers, "message": message}));
         Ok(())
     }
 
@@ -452,7 +512,9 @@ impl Hub {
         let mut cmd = Command::new("claude");
         cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
         if spec.bypass {
-            cmd.args(["--permission-mode", "bypassPermissions"]);
+            // Canal `stdio` même en bypass : seules les demandes qui EXIGENT l'utilisateur y passent
+            // (questions `AskUserQuestion`, absentes sans lui ; mesuré le 2026-11-10).
+            cmd.args(["--permission-mode", "bypassPermissions", "--permission-prompt-tool", "stdio"]);
         } else {
             cmd.args(["--permission-mode", "manual", "--permission-prompt-tool", "stdio"]);
         }
@@ -503,6 +565,7 @@ impl Hub {
                 tokens: spec.tokens_base,
                 model: spec.model.clone(),
                 queue: Vec::new(),
+                bash_context: Vec::new(),
                 images: Vec::new(),
                 finished_at: 0,
                 seen_at: 0,
@@ -563,6 +626,10 @@ impl Hub {
                         }
                         Some("result") => {
                             let reported = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
+                            // Résultat « vide » (aucun tour : 0 s, 0 token) : à la reprise, Claude Code y
+                            // renvoie le coût cumulé de toute la session restaurée. Ce n'est pas une dépense
+                            // de ce tour : il ne sert que de point de départ au décompte.
+                            let noop = is_noop_result(&ev);
                             let u = &ev["usage"];
                             let n = |k: &str| u[k].as_i64().unwrap_or(0);
                             let turn = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens") + n("output_tokens");
@@ -571,10 +638,12 @@ impl Hub {
                                 let before = st.tokens;
                                 // Cumul du processus : la différence avec le précédent (un cumul qui
                                 // redescend signale un nouveau décompte : il compte en entier).
-                                let cost = if reported >= st.reported_cost { reported - st.reported_cost } else { reported };
+                                let cost = if noop { 0.0 } else if reported >= st.reported_cost { reported - st.reported_cost } else { reported };
                                 st.reported_cost = reported;
                                 st.cost_usd += cost;
-                                st.tokens += turn;
+                                if !noop {
+                                    st.tokens += turn;
+                                }
                                 (before, st.tokens, st.cost_usd)
                             };
                             chat.emit(json!({"type": "drifty", "kind": "tokens", "total": total, "cost": cost_total}));
@@ -785,6 +854,19 @@ mod tests {
         let budget = super::Limits { tokens_mode: false, ..tokens };
         assert!(budget.over_budget(0.99) && !budget.over_budget(0.5));
         assert!(!budget.compact_due(900, 1100), "en mode budget, pas d'auto-compact");
+    }
+
+    #[test]
+    fn tail_keeps_the_end() {
+        assert_eq!(super::tail_chars("abc", 5), "abc");
+        assert_eq!(super::tail_chars("abcdéf", 3), "…déf");
+    }
+
+    #[test]
+    fn noop_results_are_spotted() {
+        assert!(super::is_noop_result(&json!({"num_turns": 0, "duration_ms": 455, "total_cost_usd": 353.17})));
+        assert!(super::is_noop_result(&json!({"num_turns": 1, "duration_ms": 0, "usage": {"output_tokens": 0}})));
+        assert!(!super::is_noop_result(&json!({"num_turns": 1, "duration_ms": 2018, "usage": {"output_tokens": 222}})));
     }
 
     #[test]

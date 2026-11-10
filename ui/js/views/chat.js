@@ -8,6 +8,7 @@ import { token, withElements, userText } from "../elements.js";
 import { toBottom, jumpButton } from "../jump.js";
 import { replyActions, bindReplies } from "../reply.js";
 import { confirmBox } from "../confirm.js";
+import { mountAsk, askResolved } from "../ask.js";
 
 let source = null; // flux SSE du chat affiché (un seul à la fois)
 
@@ -115,7 +116,14 @@ export function newChatDialog(repo, onStarted) {
 
 // ------------------------------------------------------------ composeur
 // `draftKey` : le texte non envoyé est gardé (par discussion) et retrouvé au retour.
-export function composer(placeholder, onSend, { draftKey = "", onStop = null, onRecall = null, improve = null, schedule = null, prompts = null, slash = null, btw = null } = {}) {
+/** Une commande `!` et sa sortie (en cours : sans sortie, avec une roue). */
+function bashRow(ev, running = false) {
+  const meta = running ? "en cours" : `${ev.code === 0 ? "" : `code ${ev.code ?? "?"} · `}${ev.ms < 1000 ? `${ev.ms} ms` : `${(ev.ms / 1000).toFixed(1)} s`}`;
+  const title = running ? "" : "Jointe au prochain message envoyé à Claude";
+  return `<div class="bash-run${running ? " running" : ""}" title="${title}"><div class="bash-cmd"><b>!</b><span>${esc(ev.command)}</span><span class="bash-meta">${esc(meta)}</span></div>${ev.stdout ? `<pre>${esc(ev.stdout)}</pre>` : ""}${ev.stderr ? `<pre class="err">${esc(ev.stderr)}</pre>` : ""}</div>`;
+}
+
+export function composer(placeholder, onSend, { draftKey = "", onStop = null, onRecall = null, improve = null, schedule = null, prompts = null, slash = null, btw = null, bash = null } = {}) {
   const el = document.createElement("div");
   el.className = "composer";
   el.innerHTML = `<div class="attach-row" hidden></div>
@@ -177,6 +185,7 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
   el.addEventListener("drop", (e) => { e.preventDefault(); el.classList.remove("drop"); addFiles(e.dataTransfer.files); });
   const key = draftKey ? "drifty.draft." + draftKey : "";
   try { if (key) ta.value = localStorage.getItem(key) || ""; } catch {}
+  if (bash && ta.value.startsWith("!")) el.classList.add("bash-mode");
   const save = () => { try { if (key) ta.value ? localStorage.setItem(key, ta.value) : localStorage.removeItem(key); } catch {} };
   // Hauteur = contenu + bordure (sinon il manque 2 px et une barre de défilement apparaît pour rien).
   // La barre ne s'affiche qu'au-delà de la hauteur maximale ; l'étoile se décale alors pour ne pas la couvrir.
@@ -188,9 +197,19 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
     ta.style.overflowY = full > MAX_H ? "auto" : "hidden";
     ta.parentElement?.classList.toggle("scrolling", full > MAX_H);
   };
+  // `!` en tête (si la discussion le permet) : commande shell, comme dans le terminal.
+  const isBash = () => !!bash && ta.value.startsWith("!");
+  const markBash = () => el.classList.toggle("bash-mode", isBash());
   const send = async () => {
     const t = ta.value.trim();
     if (!t && !images.length && !elements.length) return;
+    if (isBash()) {
+      const cmd = ta.value.slice(1).trim();
+      if (!cmd) return;
+      ta.value = ""; save(); grow(); markBash(); // la saisie se libère : la commande tourne dans le fil
+      bash(cmd).catch((e) => toast(e.message, true));
+      return;
+    }
     ta.disabled = true;
     try {
       await onSend(withElements(t, elements), images.map(({ media_type, data }) => ({ media_type, data })));
@@ -199,7 +218,7 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
     ta.disabled = false;
     ta.focus();
   };
-  ta.addEventListener("input", () => { grow(); save(); });
+  ta.addEventListener("input", () => { grow(); save(); markBash(); });
   ta.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
     // ↑ dans un champ vide : reprend le dernier message en attente (comme dans le terminal).
@@ -242,7 +261,7 @@ export function composer(placeholder, onSend, { draftKey = "", onStop = null, on
   el.addText = (text) => insertAt(text);
   // Hauteur recalculée quand la saisie redevient visible (texte inséré pendant qu'elle était cachée).
   new ResizeObserver(() => { if (el.offsetParent) grow(); }).observe(el);
-  el.fill = (text) => { ta.value = text; save(); grow(); ta.focus(); ta.setSelectionRange(text.length, text.length); };
+  el.fill = (text) => { ta.value = text; save(); grow(); markBash(); ta.focus(); ta.setSelectionRange(text.length, text.length); };
   requestAnimationFrame(grow);
   return el;
 }
@@ -481,8 +500,13 @@ export async function renderLive(box, chatId, onMeta) {
       comp.fill(r.text);
     } catch (e) { toast(e.message, true); }
   };
-  const comp = composer("Écris à Claude…", (t, images) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text: t, images } }), {
+  const comp = composer("Écris à Claude… (! pour une commande shell)", (t, images) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text: t, images } }), {
     draftKey: chatId,
+    // `!commande` : tourne dans le dossier de la discussion ; sa sortie part avec le prochain message.
+    bash: async (cmd) => {
+      const row = add(bashRow({ command: cmd }, true));
+      try { await api(`/api/chats/${chatId}/bash`, { method: "POST", json: { text: cmd } }); } finally { row.remove(); }
+    },
     improve: () => ({ chat_id: chatId }),
     prompts: { repoId: () => info.repo_id },
     slash: () => ({ chat: chatId }),
@@ -655,6 +679,8 @@ export async function renderLive(box, chatId, onMeta) {
   await loadBarCfg();
   onMeta?.({ tokens: info.tokens_total, cost: info.cost_usd });
 
+  let lastReported = 0; // dernier coût cumulé reçu (voir « result »)
+  const asks = new Map(); // questions de Claude (AskUserQuestion) par demande, pour leur récapitulatif
   const handle = (ev, at) => {
     const t = ev.type;
     if (t === "drifty") {
@@ -669,8 +695,13 @@ export async function renderLive(box, chatId, onMeta) {
         add(`<div class="msg-user-wrap">${imageStrip(urls)}${ev.text ? `<div class="msg-user">${userText(ev.text)}</div>` : ""}</div>`);
       }
       else if (ev.kind === "queued") {
-        const el = add(`<div class="msg-user queued" data-q="${esc(ev.id)}"><div>${userText(ev.text)}${ev.image_count ? ` <span class="muted">(+${ev.image_count} image${ev.image_count > 1 ? "s" : ""})</span>` : ""}</div><div class="q-foot"><span>En attente</span><button class="link" type="button" data-edit>Modifier</button><button class="link" type="button" data-now title="Claude le lit dès sa prochaine étape, sans interrompre son travail">Envoyer maintenant</button></div></div>`);
+        const el = add(`<div class="msg-user queued" data-q="${esc(ev.id)}"><div>${userText(ev.text)}${ev.image_count ? ` <span class="muted">(+${ev.image_count} image${ev.image_count > 1 ? "s" : ""})</span>` : ""}</div><div class="q-foot"><span>En attente</span><button class="link" type="button" data-edit>Modifier</button><button class="link" type="button" data-cancel title="Retirer ce message de la file : il ne sera pas envoyé">Annuler</button><button class="link" type="button" data-now title="Claude le lit dès sa prochaine étape, sans interrompre son travail">Envoyer maintenant</button></div></div>`);
         el.querySelector("[data-edit]").addEventListener("click", () => recall(ev.id));
+        // Annuler : le message quitte la file sans revenir dans la saisie.
+        el.querySelector("[data-cancel]").addEventListener("click", (e) => {
+          e.currentTarget.disabled = true;
+          api(`/api/chats/${chatId}/queue/${encodeURIComponent(ev.id)}`, { method: "DELETE" }).then(() => toast("Message annulé.")).catch((err) => { toast(err.message, true); e.currentTarget.disabled = false; });
+        });
         el.querySelector("[data-now]").addEventListener("click", (e) => {
           e.currentTarget.disabled = true;
           api(`/api/chats/${chatId}/queue/${encodeURIComponent(ev.id)}/now`, { method: "POST" }).catch((err) => { toast(err.message, true); e.currentTarget.disabled = false; });
@@ -680,11 +711,13 @@ export async function renderLive(box, chatId, onMeta) {
         queued.get(ev.id)?.remove();
         queued.delete(ev.id);
       }
+      else if (ev.kind === "bash") add(bashRow(ev));
       else if (ev.kind === "status") setStatus(ev.status);
       else if (ev.kind === "notice") add(`<div class="event notice">${esc(ev.text)}</div>`);
       else if (ev.kind === "permission_resolved") {
         const card = thread.querySelector(`[data-perm="${CSS.escape(ev.request_id)}"]`);
-        if (card) { card.classList.add(ev.allow ? "ok" : "no"); card.querySelector(".perm-actions").innerHTML = `<span class="small">${ev.allow ? "Autorisé" : "Refusé"}</span>`; }
+        if (card?.classList.contains("ask")) { card.classList.add(ev.allow ? "ok" : "no"); card.removeAttribute("tabindex"); card.innerHTML = askResolved(asks.get(ev.request_id), ev); }
+        else if (card) { card.classList.add(ev.allow ? "ok" : "no"); card.querySelector(".perm-actions").innerHTML = `<span class="small">${ev.allow ? "Autorisé" : "Refusé"}</span>`; }
       } else if (ev.kind === "exit") add(`<div class="event">Session terminée${ev.code ? ` (code ${ev.code})` : ""}</div>`);
       else if (ev.kind === "stderr" && /error|erreur/i.test(ev.text)) add(`<div class="event err">${esc(ev.text)}</div>`);
       return;
@@ -721,6 +754,17 @@ export async function renderLive(box, chatId, onMeta) {
       }
       return;
     }
+    if (t === "control_request" && ev.request?.subtype === "can_use_tool" && ev.request.tool_name === "AskUserQuestion") {
+      const decide = (body) => api(`/api/chats/${chatId}/permission`, { method: "POST", json: { request_id: ev.request_id, ...body } }).catch((e) => { toast(e.message, true); throw e; });
+      const card = addReply(`<div class="perm ask" data-perm="${esc(ev.request_id)}"></div>`);
+      asks.set(ev.request_id, ev.request);
+      mountAsk(card, ev.request, {
+        answer: (answers) => decide({ allow: true, answers }),
+        refuse: (message) => decide({ allow: false, message }),
+        chat: () => $("textarea", comp)?.focus(),
+      });
+      return;
+    }
     if (t === "control_request" && ev.request?.subtype === "can_use_tool") {
       const r = ev.request;
       const card = addReply(`<div class="perm" data-perm="${esc(ev.request_id)}">
@@ -736,12 +780,17 @@ export async function renderLive(box, chatId, onMeta) {
     if (t === "result") {
       if (!document.hidden) api(`/api/chats/${chatId}/seen`, { method: "POST" }).catch(() => {});
       if (live) { live.remove(); live = null; }
-      cost += ev.total_cost_usd || 0;
       const u = ev.usage || {};
-      // Fin du tour : heure, durée, coût, tokens écrits.
-      add(`<div class="event" title="${esc(new Date(at || Date.now()).toLocaleString("fr-FR"))}">${ev.is_error ? "Erreur" : "Terminé"} ${esc(turnEnd(at, ev.duration_ms))} · ${usd(ev.total_cost_usd || 0)} · ${tok((u.output_tokens || 0))} tokens écrits</div>`);
+      // `total_cost_usd` est CUMULÉ depuis le lancement (et, à la reprise, depuis le début de la
+      // session) : le coût du tour est la différence avec le résultat précédent. Le total de la
+      // discussion vient du serveur (événement « tokens »).
+      const reported = ev.total_cost_usd || 0;
+      const turnCost = reported >= lastReported ? reported - lastReported : reported;
+      lastReported = reported;
+      // Un résultat sans aucun tour (reprise, commande locale : 0 s, 0 token) n'est pas une réponse.
+      const noop = ev.num_turns === 0 || (!ev.duration_ms && !u.output_tokens);
+      if (!noop) add(`<div class="event" title="${esc(new Date(at || Date.now()).toLocaleString("fr-FR"))}">${ev.is_error ? "Erreur" : "Terminé"} ${esc(turnEnd(at, ev.duration_ms))} · ${usd(turnCost)} · ${tok((u.output_tokens || 0))} tokens écrits</div>`);
       curReply = null;
-      onMeta?.({ cost });
     }
   };
 

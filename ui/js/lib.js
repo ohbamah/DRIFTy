@@ -184,6 +184,7 @@ const P = {
   cursor: '<path d="M5 3l14 7-6.5 2L10 19Z"/><path d="m13 13 5 5"/>',
   dots: '<circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/>',
   agent: '<circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 4.5l1.5-1.5M5 4.5 3.5 3"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
   upload: '<path d="M12 16V4M7 9l5-5 5 5M4 20h16"/>',
 };
 export const icon = (name) =>

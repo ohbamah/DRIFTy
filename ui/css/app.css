@@ -34,6 +34,7 @@
   --s3: #3ddc97;
   --s4: #f5b83d;
   --code: #0a0b0d;
+  --bash: #fd5db1; --bash-soft: rgba(253, 93, 177, 0.18);
   --shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
   --dots: rgba(255, 255, 255, 0.045);
   --font: "Plex", system-ui, -apple-system, sans-serif;
@@ -50,10 +51,12 @@
     --gain: #0f9960; --waste: #e0452a; --error: #d63434;
     --s1: #2563eb; --s2: #0e9fb5; --s3: #0f9960; --s4: #c88a06;
     --code: #f4f5f7; --shadow: 0 16px 40px rgba(15, 17, 21, 0.12); --dots: rgba(15, 17, 21, 0.06);
+    --bash: #d6338a; --bash-soft: rgba(214, 51, 138, 0.12);
   }
 }
 :root[data-theme="light"] {
   color-scheme: light;
+  --bash: #d6338a; --bash-soft: rgba(214, 51, 138, 0.12);
   --bg: #f4f5f7; --pane: #ffffff; --raised: #f7f8fa; --hover: #eef0f3; --line: #d9dde3; --line-soft: #e6e9ee;
   --ink: #0f1115; --ink-2: #474d57; --muted: #7a808b;
   --accent: #2563eb; --accent-2: #3b82f6; --accent-soft: rgba(37, 99, 235, 0.10);
@@ -1428,4 +1431,55 @@ details[open] > summary .ghp-show::after { content: "Masquer"; }
 .bg-chip svg { width: 12px; height: 12px; vertical-align: -2px; }
 /* CI : durée des checks ; animations sur leur propre calque (sinon WebKit ne les redessine qu'à une interaction) */
 .ghp-ci-t { margin-left: 8px; font-size: 12px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
-.ghp-ci.pending, .gh-ci.pending, .spin, .st-working { will-change: transform; transform: translateZ(0); }
+.ghp-ci.pending, .gh-ci.pending, .spin, .st-working { will-change: transform; }
+
+/* pile : état des PR */
+.ghp-state-s { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: 2em; font-size: 11.5px; font-weight: 500; color: #fff; flex: none; }
+.ghp-state-s .gi { width: 11px; height: 11px; }
+.ghp-state-s.merged { background: #8250df; } .ghp-state-s.closed { background: #cf222e; }
+.ghp-stk.merged-row .ghp-stk-t { color: var(--g-muted); }
+.st-monitor svg { width: 12px; height: 12px; color: var(--muted); }
+.ghp-iconbtn.spinning svg { animation: spin 0.9s linear infinite; will-change: transform; color: var(--g-accent); }
+.ghp-iconbtn.spinning { pointer-events: none; }
+
+/* Mode bash (`!` en tête, comme dans le terminal) : la saisie passe au rose ; la commande et sa
+   sortie s'affichent dans le fil et partent avec le prochain message. */
+.composer textarea { transition: border-color .15s, box-shadow .15s, color .15s; }
+.composer.bash-mode textarea, .composer.bash-mode textarea:focus { border-color: var(--bash); box-shadow: 0 0 0 3px var(--bash-soft); color: var(--bash); font-family: var(--mono); font-size: 13px; }
+.composer.bash-mode .btn.primary { background: var(--bash); border-color: var(--bash); }
+.bash-run { margin: 18px 0 12px auto; max-width: 86%; width: fit-content; min-width: 40%; border: 1px solid var(--bash-soft); border-left: 3px solid var(--bash); border-radius: 8px; background: var(--code); font-family: var(--mono); font-size: 12.5px; overflow: hidden; }
+.bash-run .bash-cmd { padding: 7px 12px; color: var(--bash); white-space: pre-wrap; overflow-wrap: anywhere; display: flex; gap: 10px; align-items: baseline; }
+.bash-run .bash-cmd b { font-weight: 600; }
+.bash-run .bash-meta { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.bash-run pre { margin: 0; padding: 8px 12px 10px; border-top: 1px solid var(--line-soft); max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
+.bash-run pre.err { color: var(--error); }
+.bash-run.running .bash-meta::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 6px; border: 2px solid var(--bash-soft); border-top-color: var(--bash); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
+
+/* Questions à choix de Claude (AskUserQuestion) */
+.perm.ask { padding: 0; outline: none; }
+.perm.ask:focus-visible, .perm.ask:focus-within { box-shadow: 0 0 0 3px var(--accent-soft); }
+.ask-tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line-soft); }
+.ask-tab { border: 0; background: none; color: var(--ink-2); font: inherit; font-size: 12.5px; padding: 6px 10px 7px; border-radius: 6px 6px 0 0; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+.ask-tab:hover { color: var(--ink); background: var(--hover); }
+.ask-tab.on { color: var(--accent-ink); background: var(--accent); }
+.ask-box { font-size: 13px; line-height: 1; }
+.ask-body { padding: 12px 14px; }
+.ask-q { font-weight: 600; margin-bottom: 10px; }
+.ask-opts { display: flex; flex-direction: column; gap: 2px; }
+.ask-opt { display: flex; gap: 10px; align-items: flex-start; padding: 7px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.ask-opt:hover { background: var(--hover); }
+.ask-opt.cur { background: var(--accent-soft); border-color: var(--accent); }
+.ask-opt.sel .ask-label { color: var(--accent-2); }
+.ask-n { color: var(--muted); font-family: var(--mono); font-size: 12px; min-width: 18px; padding-top: 1px; }
+.ask-check { font-size: 14px; line-height: 1.2; }
+.ask-label { font-weight: 500; }
+.ask-desc { color: var(--ink-2); font-size: 12.5px; margin-top: 2px; }
+.ask-other { flex: 1; border: 0; border-bottom: 1px dashed var(--line); background: none; color: var(--ink); font: inherit; padding: 2px 0; outline: none; }
+.ask-other:focus { border-bottom-color: var(--accent); }
+.ask-foot { display: flex; gap: 14px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+.ask-keys { margin-left: auto; color: var(--muted); font-size: 11.5px; }
+.ask-review { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ask-review.done { padding: 12px 14px; }
+.ask-ans { color: var(--gain); }
+.ask-miss { color: var(--muted); font-style: italic; }
+.ask-done { padding: 10px 14px; color: var(--ink-2); font-size: 13px; }

@@ -202,15 +202,17 @@ export async function openGithub(target, title, { toClaude } = {}) {
     ${stack.map((p, i) => `<div class="ghp-stk${p.current ? " on" : ""}">
       <span class="ghp-stk-n">${i + 1}</span>
       <a href="${esc(p.url)}" target="_blank" rel="noopener" class="ghp-stk-t"><span class="ghp-muted">#${p.number}</span> ${esc(p.title)}</a>
-      ${p.draft ? `<span class="ghp-label">brouillon</span>` : ""}
-      ${p.current ? `<span class="ghp-label cur">actuelle</span>` : `<button class="ghp-btn xs" data-checkout="${p.number}" data-head="${esc(p.head)}">Basculer</button>`}
+      ${p.state === "merged" ? `<span class="ghp-state-s merged">${ic("merged")}Fusionnée</span>` : p.state === "closed" ? `<span class="ghp-state-s closed">${ic("prclosed")}Fermée</span>` : p.draft ? `<span class="ghp-label">brouillon</span>` : ""}
+      ${p.current ? `<span class="ghp-label cur">actuelle</span>` : p.state === "open" ? `<button class="ghp-btn xs" data-checkout="${p.number}" data-head="${esc(p.head)}">Basculer</button>` : ""}
     </div>`).join("")}
   </div>`;
 
   const reviewersBox = (pr) => `<div class="ghp-side">
     <div class="ghp-side-h"><span>Relecteurs</span><button class="ghp-iconbtn" data-reviewers title="Demander une relecture">${ic("gear")}</button></div>
     ${pr.reviewers.length ? pr.reviewers.map((r) => `<div class="ghp-rev">${av(r.who, 20)}<b>${esc(shortLogin(r.who.login))}</b><span style="flex:1"></span>${
-      r.state === "requested" ? `<span title="Relecture demandée">${ic("dot", "wait")}</span>`
+      // Demandée (GitHub l'a enregistrée) : point d'attente, pour Copilot comme pour une personne.
+      // La flèche ne tourne que pendant l'envoi de la demande (au clic).
+      r.state === "requested" ? `<span title="${isCopilot(r.who.login) ? "Copilot relit la PR" : "Relecture demandée"}">${ic("dot", "wait")}</span>`
         : `<button class="ghp-iconbtn sm" data-rerequest="${esc(ghLogin(r.who.login))}" title="Redemander une relecture">${icon("sync")}</button>${REVIEW[r.state] ? `<span title="${REVIEW[r.state][2]}">${ic(REVIEW[r.state][0], REVIEW[r.state][1])}</span>` : ""}`}</div>`).join("")
       : `<div class="ghp-muted small">Personne pour l'instant.</div>`}
     <div class="ghp-pop" hidden></div>
@@ -295,10 +297,11 @@ export async function openGithub(target, title, { toClaude } = {}) {
     const g = pr.gate || { level: "ok", reasons: [] };
     if (g.level === "draft") return `<div class="ghp-mfoot"><button class="ghp-btn" data-ready>Marquer prête pour relecture</button><span class="ghp-muted small">La PR est un brouillon.</span></div>`;
     const why = g.reasons.length ? `<ul class="ghp-why">${g.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : "";
-    const head = g.level === "conflict" ? `<div class="ghp-gate ko">${ic("alert", "ko")}<div><b>Fusion impossible</b>${why}</div></div>`
+    const head = g.level === "stack" ? `<div class="ghp-gate ko">${ic("alert", "ko")}<div><b>Fusion bloquée : la pile se fusionne par le bas</b>${why}</div></div>`
+      : g.level === "conflict" ? `<div class="ghp-gate ko">${ic("alert", "ko")}<div><b>Fusion impossible</b>${why}</div></div>`
       : g.level === "rules" ? `<div class="ghp-gate ko">${ic("alert", "ko")}<div><b>Fusion bloquée par les règles du dépôt</b>${why}${pr.can_admin ? "" : `<div class="ghp-muted small">Tu n'as pas les droits pour contourner ces règles.</div>`}</div></div>`
       : g.level === "confirm" ? `<div class="ghp-gate warn">${ic("alert", "wait")}<div><b>La CI n'est pas verte</b>${why}</div></div>` : "";
-    const can = g.level !== "conflict";
+    const can = g.level !== "conflict" && g.level !== "stack";
     return `<div class="ghp-mfoot col">${head}
       ${can ? `<div class="ghp-mopts">
         ${g.level === "confirm" ? `<label class="ghp-check-l"><input type="checkbox" data-force> Je confirme fusionner malgré la CI</label>` : ""}
@@ -306,7 +309,7 @@ export async function openGithub(target, title, { toClaude } = {}) {
         <label class="ghp-check-l"><input type="checkbox" data-auto> Fusion automatique dès que les conditions sont remplies</label>
       </div>` : ""}
       <div class="ghp-row"><div class="ghp-split"><button class="ghp-btn primary" data-merge disabled>Squash and merge</button><button type="button" class="ghp-btn primary ghp-caret" data-caret title="Méthode de fusion">${icon("chevron")}</button><select data-method data-native hidden><option value="squash">Squash and merge</option><option value="merge">Create a merge commit</option><option value="rebase">Rebase and merge</option></select></div>
-        ${g.level === "conflict" ? `<span class="ghp-muted small">Résous les conflits pour pouvoir fusionner.</span>` : ""}</div>
+        ${g.level === "conflict" ? `<span class="ghp-muted small">Résous les conflits pour pouvoir fusionner.</span>` : g.level === "stack" ? `<span class="ghp-muted small">Bascule sur la PR du bas (Pile de PR) pour la fusionner d'abord.</span>` : ""}</div>
     </div>`;
   };
 
@@ -348,7 +351,9 @@ export async function openGithub(target, title, { toClaude } = {}) {
       </div></div>`}`;
     body.scrollTop = keep.top;
     wire(pr, keep, unresolved);
-    if (pr?.checks.some((c) => c.status === "pending") && document.body.contains(panel)) timer = setTimeout(() => draw(true), 15000);
+    // Actualisation discrète tant qu'un check tourne ou que Copilot relit.
+    const busy = pr?.checks.some((c) => c.status === "pending") || pr?.reviewers.some((r) => r.state === "requested" && isCopilot(r.who.login));
+    if (busy && document.body.contains(panel)) timer = setTimeout(() => draw(true), 15000);
   }
 
   // ---------------------------------------------------------- actions
@@ -398,8 +403,11 @@ export async function openGithub(target, title, { toClaude } = {}) {
       $$("[data-login]", pop).forEach((b) => b.addEventListener("click", () => act(b, { action: "review", login: b.dataset.login }, `Relecture demandée à ${b.dataset.login === "@copilot" ? "Copilot" : b.dataset.login}.`)));
     });
 
-    $$("[data-rerequest]", body).forEach((b) => b.addEventListener("click", () =>
-      act(b, { action: "review", login: b.dataset.rerequest }, `Relecture redemandée à ${shortLogin(b.dataset.rerequest.replace(/^@/, ""))}.`)));
+    // La flèche tourne dès le clic : la demande part, et ça se voit.
+    $$("[data-rerequest]", body).forEach((b) => b.addEventListener("click", () => {
+      b.classList.add("spinning");
+      act(b, { action: "review", login: b.dataset.rerequest }, `Relecture redemandée à ${shortLogin(b.dataset.rerequest.replace(/^@/, ""))}.`).finally(() => b.classList.remove("spinning"));
+    }));
 
     const checks = pr.checks;
     $$("[data-thread]", body).forEach((b) => b.addEventListener("click", (e) => {
@@ -428,7 +436,7 @@ export async function openGithub(target, title, { toClaude } = {}) {
       if (!mergeBtn) return;
       const auto = box("[data-auto]"), admin = box("[data-admin]"), force = box("[data-force]");
       // Fusion automatique et contournement s'excluent : cocher l'un décoche l'autre.
-      mergeBtn.disabled = level === "conflict" || !(level === "ok" || auto || (level === "confirm" && force) || (level === "rules" && admin));
+      mergeBtn.disabled = level === "conflict" || level === "stack" || !(level === "ok" || auto || (level === "confirm" && force) || (level === "rules" && admin));
       mergeBtn.classList.toggle("danger", admin);
       $(".ghp-caret", body)?.classList.toggle("danger", admin);
       mergeBtn.textContent = auto ? "Activer la fusion automatique" : admin ? "Contourner et fusionner" : method.selectedOptions[0].textContent;
@@ -445,11 +453,11 @@ export async function openGithub(target, title, { toClaude } = {}) {
     mergeBtn?.addEventListener("click", async (e) => {
       const btn = e.currentTarget;
       const auto = box("[data-auto]"), admin = box("[data-admin]"), force = box("[data-force]"), label = method.selectedOptions[0].textContent;
-      const what = auto ? `Activer la fusion automatique (${label}) de la PR #${pr.number} ?`
+      const what = (auto ? `Activer la fusion automatique (${label}) de la PR #${pr.number} ?`
         : admin ? `Contourner les règles du dépôt et fusionner la PR #${pr.number} vers ${pr.base} maintenant ?`
-        : `${label} : PR #${pr.number} vers ${pr.base} ?`;
+        : `${label} : PR #${pr.number} vers ${pr.base} ?`);
       if (!(await confirmBox(what, { ok: admin ? "Contourner et fusionner" : "Fusionner", danger: admin }))) return;
-      act(btn, { action: "merge", method: method.value, auto, admin, force }, (r) => (r.auto ? "Fusion automatique activée." : r.admin ? "PR fusionnée (règles contournées)." : "PR fusionnée."));
+      act(btn, { action: "merge", method: method.value, auto, admin, force }, (r) => ({ auto: "Fusion automatique activée.", merged: r.admin ? "PR fusionnée (règles contournées)." : "PR fusionnée.", enqueued: "PR ajoutée à la file de fusion.", pending: "Fusion lancée : GitHub la termine en arrière-plan." })[r.status] || "Fusion demandée.");
     });
 
     // Prompts confiés à Claude : un commentaire, un fil, ou tous les fils non résolus (jamais les résolus).

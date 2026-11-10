@@ -12,7 +12,7 @@ use std::process::Command;
 
 use crate::{review, review_dir, ApiResult, App, ReviewTarget};
 
-const PR_FIELDS: &str = "number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,baseRefName";
+const PR_FIELDS: &str = "number,title,url,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,baseRefName,headRefOid";
 
 fn run(dir: &str, prog: &str, args: &[&str]) -> Result<String> {
     let out = Command::new(prog)
@@ -152,13 +152,19 @@ fn timeline(dir: &str, n: i64) -> Result<Value> {
 /// `ok` ; `confirm` (checks en échec ou en cours, sans règle qui bloque : fusion après
 /// confirmation) ; `rules` (une règle du dépôt bloque : contournement par un
 /// administrateur, ou fusion automatique) ; `conflict` et `draft` (aucune fusion possible).
-fn gate(p: &Value, checks: &[Value]) -> Value {
+fn gate(p: &Value, checks: &[Value], stack: &Value) -> Value {
     let merge_state = lower(&p["mergeStateStatus"]);
     let failed = checks.iter().filter(|c| c["status"] == "done" && !matches!(c["conclusion"].as_str(), Some("success" | "skipped" | "neutral" | "cancelled"))).count();
     let pending = checks.iter().filter(|c| c["status"] == "pending").count();
     let mut reasons: Vec<String> = Vec::new();
     if p["isDraft"] == true {
         return json!({"level": "draft", "reasons": ["La PR est un brouillon."]});
+    }
+    // Pile : la base d'abord. Pas de contournement (on fusionnerait les PR du dessous avec elle).
+    let below = open_below(stack);
+    if !below.is_empty() {
+        let list = below.iter().map(|n| format!("#{n}")).collect::<Vec<_>>().join(", ");
+        return json!({"level": "stack", "reasons": [format!("{}, en dessous dans la pile, {} pas encore fusionnée{}.", list, if below.len() > 1 { "ne sont" } else { "n'est" }, if below.len() > 1 { "s" } else { "" })]});
     }
     if lower(&p["mergeable"]) == "conflicting" || merge_state == "dirty" {
         return json!({"level": "conflict", "reasons": ["La branche a des conflits avec la base."]});
@@ -192,25 +198,91 @@ fn gate(p: &Value, checks: &[Value]) -> Value {
     json!({"level": level, "reasons": reasons})
 }
 
+/// Fusion par l'API asynchrone de GitHub (`PUT …/pulls/{n}/merge-async`) : la seule qui
+/// fusionne une PR empilée (avec toutes les PR ouvertes en dessous d'elle), recommandée par
+/// GitHub pour toutes. Le résultat est suivi jusqu'à un état final (30 s au plus) :
+/// `merged`, `enqueued` (file de fusion) ou `failed` ; sinon `pending` (GitHub termine seul).
+fn merge_async(dir: &str, n: &str, method: &str, head_sha: &str, admin: bool) -> Result<Value> {
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{n}/merge-async");
+    let mut args = vec!["api".to_string(), "-X".into(), "PUT".into(), path.clone(), "-f".into(), format!("merge_method={method}"), "-F".into(), format!("bypass_rules={admin}")];
+    if !head_sha.is_empty() {
+        // La tête vérifiée : si la branche bouge entre la demande et l'exécution, GitHub annule.
+        args.extend(["-f".into(), format!("sha={head_sha}")]);
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = match run(dir, "gh", &argv) {
+        Ok(r) => r,
+        Err(e) if e.to_string().contains("409") || e.to_string().contains("already") => {
+            return Ok(json!({"method": method, "status": "pending", "note": "already_pending"}));
+        }
+        Err(e) => return Err(anyhow::anyhow!("The pull request cannot be merged because GitHub refused: {e}")),
+    };
+    let mut v: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
+    let uuid = v.pointer("/details/uuid").and_then(Value::as_str).map(str::to_string);
+    for _ in 0..15 {
+        if v["status"] != "pending" {
+            break;
+        }
+        let Some(u) = &uuid else { break };
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if let Some(r) = ok(dir, "gh", &["api", &format!("{path}/{u}")]) {
+            v = serde_json::from_str(&r).unwrap_or(v);
+        }
+    }
+    let status = v["status"].as_str().unwrap_or("pending").to_string();
+    if status == "failed" {
+        let why = v.pointer("/details/message").or(v.pointer("/details/error")).and_then(Value::as_str).unwrap_or("unknown reason");
+        bail!("The pull request cannot be merged because GitHub reported a failure: {why}");
+    }
+    Ok(json!({"method": method, "status": status, "admin": admin}))
+}
+
 /// Pile de PR empilées autour de la branche : les PR dont elle part (vers la base), puis
 /// celles qui partent d'elle. Du bas (la plus proche de la base) vers le haut ; vide si seule.
-fn stack(dir: &str, br: &str) -> Value {
-    let Some(raw) = ok(dir, "gh", &["pr", "list", "--state", "open", "--limit", "200", "--json", "number,title,headRefName,baseRefName,isDraft,url"]) else {
+fn stack(dir: &str, br: &str, number: i64) -> Value {
+    let entry = |n: &Value, title: &Value, head: &str, base: &str, draft: bool, url: &Value, state: &str| {
+        json!({"number": n, "title": title, "head": head, "base": base, "draft": draft, "url": url, "state": state, "current": head == br})
+    };
+    // Pile native de GitHub : retrouvée par son identifiant, quel que soit l'état de ses PR.
+    let native = ok(dir, "gh", &["api", &format!("repos/{{owner}}/{{repo}}/pulls/{number}"), "--jq", ".stack.id // empty"]).filter(|s| !s.is_empty());
+    if let Some(id) = native {
+        let raw = ok(dir, "gh", &["api", "repos/{owner}/{repo}/pulls?state=all&per_page=100&sort=updated&direction=desc"]).unwrap_or_default();
+        let Ok(Value::Array(all)) = serde_json::from_str::<Value>(&raw) else { return json!([]) };
+        let mut mine: Vec<&Value> = all.iter().filter(|p| p.pointer("/stack/id").map(|v| v.to_string().trim_matches('"').to_string()) == Some(id.clone())).collect();
+        mine.sort_by_key(|p| p.pointer("/stack/position").and_then(Value::as_i64).unwrap_or(0));
+        if mine.len() < 2 {
+            return json!([]);
+        }
+        return Value::Array(
+            mine.iter()
+                .map(|p| {
+                    let state = if !p["merged_at"].is_null() { "merged" } else { p["state"].as_str().unwrap_or("open") };
+                    entry(&p["number"], &p["title"], p.pointer("/head/ref").and_then(Value::as_str).unwrap_or(""), p.pointer("/base/ref").and_then(Value::as_str).unwrap_or(""), p["draft"] == true, &p["html_url"], state)
+                })
+                .collect(),
+        );
+    }
+    // Pile « à la main » : chaque PR part de la branche de la précédente (fusionnées comprises).
+    let Some(raw) = ok(dir, "gh", &["pr", "list", "--state", "all", "--limit", "300", "--json", "number,title,headRefName,baseRefName,isDraft,url,state"]) else {
         return json!([]);
     };
     let Ok(Value::Array(prs)) = serde_json::from_str::<Value>(&raw) else { return json!([]) };
-    let head = |b: &str| prs.iter().find(|p| p["headRefName"] == b);
+    // Pour une branche : sa PR ouverte, sinon la plus récente fusionnée (la liste va du plus récent au plus ancien).
+    let head = |b: &str| {
+        prs.iter().find(|p| p["headRefName"] == b && p["state"] == "OPEN").or_else(|| prs.iter().find(|p| p["headRefName"] == b && p["state"] == "MERGED"))
+    };
     let Some(me) = head(br) else { return json!([]) };
     let mut chain = vec![me.clone()];
-    // Vers le bas : la PR dont la tête est ma base, etc.
     let mut base = me["baseRefName"].as_str().unwrap_or("").to_string();
     while let Some(p) = head(&base).filter(|p| !chain.iter().any(|c| c["number"] == p["number"])) {
         chain.insert(0, p.clone());
         base = p["baseRefName"].as_str().unwrap_or("").to_string();
     }
-    // Vers le haut : une PR qui part de ma tête (la première s'il y en a plusieurs).
     let mut top = br.to_string();
-    while let Some(p) = prs.iter().find(|p| p["baseRefName"] == top.as_str() && !chain.iter().any(|c| c["number"] == p["number"])) {
+    while let Some(p) = prs
+        .iter()
+        .find(|p| p["baseRefName"] == top.as_str() && p["state"] != "CLOSED" && !chain.iter().any(|c| c["number"] == p["number"]))
+    {
         chain.push(p.clone());
         top = p["headRefName"].as_str().unwrap_or("").to_string();
     }
@@ -220,9 +292,20 @@ fn stack(dir: &str, br: &str) -> Value {
     Value::Array(
         chain
             .iter()
-            .map(|p| json!({"number": p["number"], "title": p["title"], "head": p["headRefName"], "base": p["baseRefName"], "draft": p["isDraft"], "url": p["url"], "current": p["headRefName"] == br}))
+            .map(|p| {
+                let state = p["state"].as_str().unwrap_or("OPEN").to_ascii_lowercase();
+                entry(&p["number"], &p["title"], p["headRefName"].as_str().unwrap_or(""), p["baseRefName"].as_str().unwrap_or(""), p["isDraft"] == true, &p["url"], &state)
+            })
             .collect(),
     )
+}
+
+/// PR ouvertes EN DESSOUS de la PR courante dans sa pile : tant qu'il y en a, elle ne se fusionne pas
+/// (GitHub les fusionnerait avec elle, en un bloc).
+fn open_below(stack: &Value) -> Vec<i64> {
+    let list = stack.as_array().cloned().unwrap_or_default();
+    let at = list.iter().position(|p| p["current"] == true).unwrap_or(0);
+    list[..at].iter().filter(|p| p["state"] == "open").filter_map(|p| p["number"].as_i64()).collect()
 }
 
 /// PR ouverte (ou la plus récente) de la branche ; `None` s'il n'y en a pas.
@@ -265,11 +348,12 @@ pub fn state(dir: &str) -> Result<Value> {
                 let checks = checks(&p["statusCheckRollup"]);
                 let n = p["number"].as_i64().unwrap_or(0);
                 let t = timeline(dir, n)?;
+                let stk = stack(dir, &br, n);
                 (
                     json!({"number": n, "title": p["title"], "url": p["url"], "state": lower(&p["state"]), "draft": p["isDraft"],
                            "review_decision": lower(&p["reviewDecision"]), "mergeable": lower(&p["mergeable"]), "merge_state": lower(&p["mergeStateStatus"]),
                            "base": p["baseRefName"], "head": t["head"], "commits": t["commits"], "author": t["author"], "viewer": t["viewer"],
-                           "reviewers": t["reviewers"], "stack": stack(dir, &br), "gate": gate(&p, &checks), "can_admin": t["can_admin"], "checks": checks, "thread": t["items"]}),
+                           "reviewers": t["reviewers"], "stack": stk, "gate": gate(&p, &checks, &stk), "can_admin": t["can_admin"], "checks": checks, "thread": t["items"]}),
                     Value::Null,
                 )
             }
@@ -381,11 +465,12 @@ pub fn act(dir: &str, a: &ActionReq) -> Result<Value> {
             }
             let b = branch(dir);
             let p = pr_view(dir, &b)?.ok_or_else(|| anyhow::anyhow!("The pull request cannot be found because the branch `{b}` has none."))?;
-            let g = gate(&p, &checks(&p["statusCheckRollup"]));
+            let stk = stack(dir, &b, p["number"].as_i64().unwrap_or(0));
+            let g = gate(&p, &checks(&p["statusCheckRollup"]), &stk);
             let level = g["level"].as_str().unwrap_or("");
             let why = g["reasons"].as_array().map(|r| r.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default();
             match level {
-                "conflict" | "draft" => bail!("The pull request cannot be merged because: {why}"),
+                "conflict" | "draft" | "stack" => bail!("The pull request cannot be merged because: {why}"),
                 "rules" if !a.auto && !a.admin => bail!("The pull request cannot be merged because a repository rule blocks it: {why}"),
                 "confirm" if !a.auto && !a.force => bail!("The pull request cannot be merged without confirmation because: {why}"),
                 _ => {}
@@ -394,16 +479,12 @@ pub fn act(dir: &str, a: &ActionReq) -> Result<Value> {
                 bail!("The pull request cannot be merged because automatic merge and rule bypass exclude each other.");
             }
             let n = p["number"].as_i64().unwrap_or(0).to_string();
-            let flag = format!("--{method}");
-            let mut args = vec!["pr", "merge", n.as_str(), flag.as_str()];
             if a.auto {
-                args.push("--auto");
+                // Fusion automatique (quand les conditions seront remplies) : `gh pr merge --auto`.
+                run(dir, "gh", &["pr", "merge", n.as_str(), &format!("--{method}"), "--auto"])?;
+                return Ok(json!({"method": method, "auto": true, "status": "auto"}));
             }
-            if a.admin {
-                args.push("--admin");
-            }
-            run(dir, "gh", &args)?;
-            Ok(json!({"method": method, "auto": a.auto, "admin": a.admin}))
+            merge_async(dir, &n, method, p["headRefOid"].as_str().unwrap_or(""), a.admin)
         }
         "ready" => {
             let n = pr_number(dir)?;
@@ -511,11 +592,18 @@ mod tests {
         let ok = json!({"status": "done", "conclusion": "success"});
         let ko = json!({"status": "done", "conclusion": "failure"});
         let pr = |state: &str, mergeable: &str| json!({"mergeStateStatus": state, "mergeable": mergeable, "isDraft": false, "reviewDecision": ""});
-        assert_eq!(super::gate(&pr("CLEAN", "MERGEABLE"), &[ok.clone()])["level"], "ok");
-        assert_eq!(super::gate(&pr("UNSTABLE", "MERGEABLE"), &[ko.clone()])["level"], "confirm");
-        assert_eq!(super::gate(&pr("BLOCKED", "MERGEABLE"), &[ko.clone()])["level"], "rules");
-        assert_eq!(super::gate(&pr("BLOCKED", "MERGEABLE"), &[])["reasons"][0], "Une règle du dépôt bloque la fusion.");
-        assert_eq!(super::gate(&pr("DIRTY", "CONFLICTING"), &[])["level"], "conflict");
+        let none = json!([]);
+        assert_eq!(super::gate(&pr("CLEAN", "MERGEABLE"), &[ok.clone()], &none)["level"], "ok");
+        assert_eq!(super::gate(&pr("UNSTABLE", "MERGEABLE"), &[ko.clone()], &none)["level"], "confirm");
+        assert_eq!(super::gate(&pr("BLOCKED", "MERGEABLE"), &[ko.clone()], &none)["level"], "rules");
+        assert_eq!(super::gate(&pr("BLOCKED", "MERGEABLE"), &[], &none)["reasons"][0], "Une règle du dépôt bloque la fusion.");
+        assert_eq!(super::gate(&pr("DIRTY", "CONFLICTING"), &[], &none)["level"], "conflict");
+        // Pile : bloquée tant qu'une PR en dessous est ouverte ; libre si elle est fusionnée ou en bas.
+        let stk = |below: &str| json!([{"number": 1, "state": below, "current": false}, {"number": 2, "state": "open", "current": true}]);
+        assert_eq!(super::gate(&pr("CLEAN", "MERGEABLE"), &[], &stk("open"))["level"], "stack");
+        assert_eq!(super::gate(&pr("CLEAN", "MERGEABLE"), &[], &stk("merged"))["level"], "ok");
+        let bottom = json!([{"number": 1, "state": "open", "current": true}, {"number": 2, "state": "open", "current": false}]);
+        assert_eq!(super::gate(&pr("CLEAN", "MERGEABLE"), &[], &bottom)["level"], "ok");
     }
 
     #[test]

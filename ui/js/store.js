@@ -57,12 +57,18 @@ const take = (chats) => {
   notify();
 };
 // Tâches de fond (sous-agents, commandes shell) par conversation, d'après les transcripts.
+// `store.busy` : sessions où Claude écrit ou réfléchit (tour en cours), y compris hors DRIFTy.
 store.bg = {};
+store.busy = new Set();
+let bgSig = "";
 const pollBg = async () => {
   if (document.hidden) return;
-  const bg = await api("/api/background").catch(() => null);
-  if (!bg || JSON.stringify(bg) === JSON.stringify(store.bg)) return;
-  store.bg = bg;
+  const r = await api("/api/background").catch(() => null);
+  const s = r && JSON.stringify(r);
+  if (!r || s === bgSig) return;
+  bgSig = s;
+  store.bg = r.tasks || {};
+  store.busy = new Set(r.busy || []);
   notify();
 };
 pollBg();

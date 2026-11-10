@@ -44,15 +44,27 @@ const STATUS = {
   unread: `<span class="st st-unread" title="Terminée, non lue"></span>`,
   idle: `<span class="st st-idle" title="En attente"></span>`,
   done: `<span class="st st-done" title="Terminée">${icon("check")}</span>`,
+  monitor: `<span class="st st-monitor" title="Attend la notification d'une surveillance (Monitor) en cours">${icon("eye")}</span>`,
 };
 const liveStatus = (chat) => (!chat ? "done" : chat.status === "working" ? "working" : chat.unread ? "unread" : chat.status === "exited" ? "done" : "idle");
 
-/** Pastille des tâches de fond d'une conversation : sous-agents et commandes shell en cours. */
+/** Une tâche de fond en une ligne : sous-agent, commande, ou surveillance (et ce qu'elle surveille). */
+export const bgLine = (t) => `${{ agent: "Sous-agent", shell: "Commande", monitor: "Surveillance" }[t.kind] || "Tâche"} : ${t.label}${t.watches?.length ? ` (surveille : ${t.watches.join(", ")})` : ""}`;
+
+/** Pastille des tâches de fond d'une conversation : sous-agents, commandes, surveillances. */
 export function bgBadge(tasks) {
   if (!tasks?.length) return "";
-  const agents = tasks.filter((t) => t.kind === "agent").length, shells = tasks.length - agents;
-  const title = tasks.map((t) => `${t.kind === "agent" ? "Sous-agent" : "Commande"} : ${t.label}`).join("\n");
-  return `<span class="sb-bg" title="${esc(title)}">${agents ? `${icon("agent")}${agents}` : ""}${shells ? `${icon("terminal")}${shells}` : ""}</span>`;
+  const n = (k) => tasks.filter((t) => t.kind === k).length;
+  const [agents, shells, monitors] = [n("agent"), n("shell"), n("monitor")];
+  const title = tasks.map(bgLine).join("\n");
+  return `<span class="sb-bg" title="${esc(title)}">${agents ? `${icon("agent")}${agents}` : ""}${shells ? `${icon("terminal")}${shells}` : ""}${monitors ? `${icon("eye")}${monitors}` : ""}</span>`;
+}
+
+/** Statut d'une ligne : Claude au travail (même hors DRIFTy) prime sur l'œil d'une surveillance. */
+function rowStatus(c, chat, sid) {
+  const live = liveStatus(chat);
+  if (live === "working" || store.busy?.has(sid) || store.busy?.has(c.id)) return "working";
+  return (store.bg?.[sid] || store.bg?.[c.id] || []).some((t) => t.kind === "monitor") ? "monitor" : live;
 }
 
 function convRow(c, chat, sel) {
@@ -62,7 +74,7 @@ function convRow(c, chat, sel) {
   // Conversation (transcript) et/ou discussion en direct : de quoi la renommer ou l'archiver.
   const sid = c.listed === false ? chat?.session_id || "" : c.id;
   return `<a class="sb-conv${on ? " on" : ""}" href="${href}" title="${esc(c.title || c.first_prompt || "")}" data-sid="${esc(sid)}" data-chat="${esc(chat?.id || "")}">
-    ${STATUS[liveStatus(chat)]}<span class="sb-title">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>${bgBadge(store.bg?.[sid] || store.bg?.[c.id])}
+    ${STATUS[rowStatus(c, chat, sid)]}<span class="sb-title">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>${bgBadge(store.bg?.[sid] || store.bg?.[c.id])}
     <span class="sb-meta">${esc(model)} ${age(chat ? Date.now() : c.last_ts)}</span>
     <button class="sb-dots" type="button" data-dots title="Renommer, archiver" aria-label="Actions">${icon("dots")}</button>
   </a>`;

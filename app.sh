@@ -27,5 +27,16 @@ echo "DRIFTy.app : $APP"
 
 case "${1:-}" in
   --open) open "$APP" ;;
-  --install) rm -rf /Applications/DRIFTy.app && cp -R "$APP" /Applications/ && echo "Installée dans /Applications." ;;
+  --install)
+    # Remplacer l'app pendant qu'elle tourne peut la faire tomber : on la ferme proprement d'abord
+    # (elle arrête son démon), puis on la relance si elle était ouverte.
+    WAS_RUNNING=0
+    if pgrep -x DRIFTy >/dev/null; then
+      WAS_RUNNING=1
+      osascript -e 'tell application "DRIFTy" to quit' >/dev/null 2>&1 || true
+      for _ in $(seq 50); do pgrep -x DRIFTy >/dev/null || break; sleep 0.2; done
+    fi
+    rm -rf /Applications/DRIFTy.app && cp -R "$APP" /Applications/ && echo "Installée dans /Applications."
+    [[ $WAS_RUNNING == 1 ]] && open /Applications/DRIFTy.app && echo "Relancée."
+    ;;
 esac

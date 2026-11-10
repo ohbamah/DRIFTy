@@ -12,6 +12,7 @@ import { openJob } from "../run.js";
 import { openRun } from "../run.js";
 import { forkMessage } from "../btw.js";
 import { mountTabs } from "../tabs.js";
+import { bgLine } from "../sidebar.js";
 import { userText } from "../elements.js";
 import { toBottom, jumpButton } from "../jump.js";
 import { confirmBox } from "../confirm.js";
@@ -116,9 +117,11 @@ function bgChip(box, sessionOf) {
     if (!slot) return unsub?.();
     const tasks = store.bg?.[sessionOf()] || [];
     if (!tasks.length) { slot.innerHTML = ""; return; }
-    const agents = tasks.filter((t) => t.kind === "agent").length, shells = tasks.length - agents;
-    const since = (t) => (t.started ? ` (depuis ${ago(Date.parse(t.started))})` : "");
-    slot.innerHTML = `<span class="chip bg-chip" title="${esc(tasks.map((t) => `${t.kind === "agent" ? "Sous-agent" : "Commande"} : ${t.label}${since(t)}`).join("\n"))}">${icon("agent")} ${[agents && `${agents} sous-agent${agents > 1 ? "s" : ""}`, shells && `${shells} commande${shells > 1 ? "s" : ""}`].filter(Boolean).join(" · ")} en arrière-plan</span>`;
+    const n = (k) => tasks.filter((t) => t.kind === k).length;
+    const [agents, shells, monitors] = [n("agent"), n("shell"), n("monitor")];
+    const since = (t) => (t.started ? ` — depuis ${ago(Date.parse(t.started))}` : "");
+    const parts = [agents && `${agents} sous-agent${agents > 1 ? "s" : ""}`, shells && `${shells} commande${shells > 1 ? "s" : ""}`, monitors && `${monitors} surveillance${monitors > 1 ? "s" : ""}`].filter(Boolean);
+    slot.innerHTML = `<span class="chip bg-chip" title="${esc(tasks.map((t) => bgLine(t) + since(t)).join("\n"))}">${icon("agent")} ${parts.join(" · ")} en arrière-plan</span>`;
   };
   const unsub = subscribe(draw);
   draw();
@@ -201,7 +204,13 @@ async function renderDetail(sid, tab) {
     </div>
     <div class="detail-body" id="detail-body"></div>`;
   slide(box);
-  mountTabs(box, $(".tabs", box), "s:" + sid, { session: sid }, {});
+  // Analyse d'une discussion en direct : ce sont SES onglets (terminaux, navigateurs), ouverts
+  // depuis « Conversation », qu'on retrouve ici, et ce qu'on y choisit va à son agent.
+  const liveChat = store.chats.find((c) => c.session_id === sid && c.status !== "exited");
+  if (liveChat) mountTabs(box, $(".tabs", box), "c:" + liveChat.id, { chat: liveChat.id }, {
+    send: (text) => api(`/api/chats/${liveChat.id}/send`, { method: "POST", json: { text } }).catch((e) => toast(e.message, true)),
+  });
+  else mountTabs(box, $(".tabs", box), "s:" + sid, { session: sid }, {});
   // Barre de conversation, même quand aucun agent ne tourne : totaux de la dernière analyse.
   (async () => {
     const [info] = await Promise.all([api(`/api/sessions/${sid}`), loadBarCfg()]);
