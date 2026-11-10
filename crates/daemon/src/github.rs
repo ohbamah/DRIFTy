@@ -67,11 +67,13 @@ fn checks(rollup: &Value) -> Vec<Value> {
                         let state = lower(&c["state"]);
                         let pending = state == "pending" || state == "expected";
                         json!({"name": c["context"], "workflow": "", "status": if pending { "pending" } else { "done" },
-                               "conclusion": if pending { String::new() } else { state }, "url": c["targetUrl"], "run_id": null})
+                               "conclusion": if pending { String::new() } else { state }, "url": c["targetUrl"], "run_id": null,
+                               "started_at": c["startedAt"], "completed_at": null})
                     } else {
                         let url = c["detailsUrl"].as_str().unwrap_or("");
                         json!({"name": c["name"], "workflow": c["workflowName"], "status": if c["status"] == "COMPLETED" { "done" } else { "pending" },
-                               "conclusion": lower(&c["conclusion"]), "url": url, "run_id": run_id(url)})
+                               "conclusion": lower(&c["conclusion"]), "url": url, "run_id": run_id(url),
+                               "started_at": c["startedAt"], "completed_at": c["completedAt"]})
                     }
                 })
                 .collect()

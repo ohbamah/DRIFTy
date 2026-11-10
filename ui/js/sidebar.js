@@ -47,6 +47,14 @@ const STATUS = {
 };
 const liveStatus = (chat) => (!chat ? "done" : chat.status === "working" ? "working" : chat.unread ? "unread" : chat.status === "exited" ? "done" : "idle");
 
+/** Pastille des tâches de fond d'une conversation : sous-agents et commandes shell en cours. */
+export function bgBadge(tasks) {
+  if (!tasks?.length) return "";
+  const agents = tasks.filter((t) => t.kind === "agent").length, shells = tasks.length - agents;
+  const title = tasks.map((t) => `${t.kind === "agent" ? "Sous-agent" : "Commande"} : ${t.label}`).join("\n");
+  return `<span class="sb-bg" title="${esc(title)}">${agents ? `${icon("agent")}${agents}` : ""}${shells ? `${icon("terminal")}${shells}` : ""}</span>`;
+}
+
 function convRow(c, chat, sel) {
   const on = (chat && chat.id === sel.c) || c.id === sel.s;
   const href = chat ? `#/conversations?c=${chat.id}` : `#/conversations?s=${c.id}`;
@@ -54,7 +62,7 @@ function convRow(c, chat, sel) {
   // Conversation (transcript) et/ou discussion en direct : de quoi la renommer ou l'archiver.
   const sid = c.listed === false ? chat?.session_id || "" : c.id;
   return `<a class="sb-conv${on ? " on" : ""}" href="${href}" title="${esc(c.title || c.first_prompt || "")}" data-sid="${esc(sid)}" data-chat="${esc(chat?.id || "")}">
-    ${STATUS[liveStatus(chat)]}<span class="sb-title">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>
+    ${STATUS[liveStatus(chat)]}<span class="sb-title">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>${bgBadge(store.bg?.[sid] || store.bg?.[c.id])}
     <span class="sb-meta">${esc(model)} ${age(chat ? Date.now() : c.last_ts)}</span>
     <button class="sb-dots" type="button" data-dots title="Renommer, archiver" aria-label="Actions">${icon("dots")}</button>
   </a>`;

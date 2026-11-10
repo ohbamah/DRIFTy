@@ -80,6 +80,20 @@ function hunk(h) {
 
 const STATE = { open: ["pr", "Ouverte"], draft: ["draft", "Brouillon"], merged: ["merged", "Fusionnée"], closed: ["prclosed", "Fermée"] };
 const REVIEW = { approved: ["check", "ok", "a approuvé ces changements"], changes_requested: ["changes", "ko", "a demandé des changements"], commented: ["eye", "", "a relu"], dismissed: ["x", "", "revue écartée"] };
+// Durée d'un check : « depuis 3 min » en cours (tenu à jour chaque seconde), « 4 min 12 s » fini.
+const ciTime = (c) => {
+  if (!c.started_at) return "";
+  const a = Date.parse(c.started_at), b = c.completed_at ? Date.parse(c.completed_at) : 0;
+  if (c.status === "pending") return `<span class="ghp-ci-t" data-since="${a}">${elapsed(Date.now() - a)}</span>`;
+  return b && b > a ? `<span class="ghp-ci-t">${elapsed(b - a)}</span>` : "";
+};
+const elapsed = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m} min ${String(s % 60).padStart(2, "0")} s` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")}`;
+};
+
 const failed = (c) => c.status === "done" && !["success", "skipped", "neutral", "cancelled"].includes(c.conclusion);
 const ciIcon = (c) => (c.status === "pending" ? `<span class="ghp-ci pending"></span>`
   : c.conclusion === "success" ? ic("check", "ok") : ["skipped", "neutral", "cancelled"].includes(c.conclusion) ? `<span class="ghp-ci skip">–</span>` : ic("x", "ko"));
@@ -113,6 +127,11 @@ export async function openGithub(target, title, { toClaude } = {}) {
   const opened = new Set(); // repliables ouverts, gardés d'une actualisation à l'autre
   $("[data-close]", panel).addEventListener("click", () => { clearTimeout(timer); panel.remove(); });
   $("[data-refresh]", panel).addEventListener("click", () => draw());
+  // Durées « depuis … » des checks en cours : mises à jour chaque seconde tant que le panneau est ouvert.
+  const tick = setInterval(() => {
+    if (!panel.isConnected) return clearInterval(tick);
+    panel.querySelectorAll("[data-since]").forEach((e) => (e.textContent = elapsed(Date.now() - +e.dataset.since)));
+  }, 1000);
   panel.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-copy-ref]");
     if (!b) return;
@@ -261,7 +280,7 @@ export async function openGithub(target, title, { toClaude } = {}) {
         ${!open ? `<div class="ghp-mrow"><div><b>${pr.state === "merged" ? "PR fusionnée" : "PR fermée"}</b></div></div>` : `
         <div class="ghp-mrow">${ic(rev[0], rev[1])}<div><b>${rev[2]}</b><div class="ghp-muted">${rev[3]}</div></div></div>
         ${ci ? `<details class="ghp-mrow-d" data-key="checks"${opened.has("checks") || nKo ? " open" : ""}><summary class="ghp-mrow">${ic(ci[0], ci[1])}<div><b>${ci[2]}</b><div class="ghp-muted">${[nKo && `${nKo} en échec`, nRun && `${nRun} en cours`, nOk && `${nOk} réussi${nOk > 1 ? "s" : ""}`].filter(Boolean).join(", ")}</div></div><span style="flex:1"></span><span class="ghp-show"></span></summary>
-          <div class="ghp-checks">${checks.map((c, i) => `<div class="ghp-check">${ciIcon(c)}<span class="ghp-check-n">${c.workflow ? `<span class="ghp-muted">${esc(c.workflow)} / </span>` : ""}${esc(c.name)}</span>
+          <div class="ghp-checks">${checks.map((c, i) => `<div class="ghp-check">${ciIcon(c)}<span class="ghp-check-n">${c.workflow ? `<span class="ghp-muted">${esc(c.workflow)} / </span>` : ""}${esc(c.name)}</span>${ciTime(c)}
             ${failed(c) && c.run_id ? `<button class="ghp-btn xs" data-rerun="${c.run_id}">Relancer</button><button class="ghp-btn xs" data-fixci="${i}">${ic("claude")}Corriger</button>` : ""}
             <a class="ghp-link" href="${esc(c.url || pr.url)}" target="_blank" rel="noopener">Détails</a></div>`).join("")}</div></details>`
           : `<div class="ghp-mrow">${ic("dot")}<div><b>Aucun check</b><div class="ghp-muted">Aucune CI ne tourne sur cette PR.</div></div></div>`}

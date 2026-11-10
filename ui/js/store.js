@@ -56,4 +56,15 @@ const take = (chats) => {
   store.chats = chats;
   notify();
 };
+// Tâches de fond (sous-agents, commandes shell) par conversation, d'après les transcripts.
+store.bg = {};
+const pollBg = async () => {
+  if (document.hidden) return;
+  const bg = await api("/api/background").catch(() => null);
+  if (!bg || JSON.stringify(bg) === JSON.stringify(store.bg)) return;
+  store.bg = bg;
+  notify();
+};
+pollBg();
+setInterval(pollBg, 10_000);
 new EventSource("/api/events").addEventListener("chats", (e) => { try { take(JSON.parse(e.data)); } catch {} });

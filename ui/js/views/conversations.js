@@ -4,7 +4,7 @@ import { md } from "../md.js";
 import { renderAnalysis } from "./analysis.js";
 import { slide, moveTo } from "../slide.js";
 import { renderLive, composer, closeStream, convBar, barSettings, loadBarCfg, modelPicker, scheduledStrip } from "./chat.js";
-import { store, ensureLoaded, reload } from "../store.js";
+import { store, ensureLoaded, reload, subscribe } from "../store.js";
 import { replyActions, bindReplies } from "../reply.js";
 import { openReview } from "../review.js";
 import { openGithub } from "../github.js";
@@ -65,7 +65,7 @@ async function renderChatDetail(chatId) {
         <button class="btn icon-only" id="chat-gh" title="GitHub : PR, CI, relectures">${icon("github")}</button>
         <button class="btn" id="chat-close" title="Arrêter et fermer la discussion">Fermer</button>
       </div>
-      <div class="meta">${slotChip(info.slot)}${info.worktree ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(info.worktree)}</span>` : ""}${info.bypass ? `<span class="chip waste">Bypass</span>` : `<span class="chip">Autorisations demandées</span>`}<span id="chat-cost"></span><span id="chat-bar"></span><span class="rebase-chip-slot"></span></div>
+      <div class="meta">${slotChip(info.slot)}${info.worktree ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(info.worktree)}</span>` : ""}${info.bypass ? `<span class="chip waste">Bypass</span>` : `<span class="chip">Autorisations demandées</span>`}<span id="chat-cost"></span><span id="chat-bar"></span><span class="rebase-chip-slot"></span><span class="bg-chip-slot"></span></div>
       <div class="tabs" role="tablist"><button class="tab on" data-tab="conv" role="tab">Conversation</button><button class="tab" data-tab="analyse" role="tab" id="chat-analyse">Analyse</button></div>
     </div>
     ${info.setup_job ? `<div class="setup-strip" id="setup-strip"></div>` : ""}
@@ -86,6 +86,7 @@ async function renderChatDetail(chatId) {
   const sendToChat = (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).catch((e) => toast(e.message, true));
   $("#chat-gh", box).addEventListener("click", () => openGithub({ chat: chatId }, info.name, { toClaude: sendToChat }));
   rebaseChip(box, { chat: chatId }, "#chat-gh");
+  bgChip(box, () => store.chats.find((c) => c.id === chatId)?.session_id || info.session_id);
   $("#chat-review", box).addEventListener("click", () => openReview({ chat: chatId }, info.name));
   $("#chat-run", box).addEventListener("click", () => openRun({ chat: chatId }, info.repo_id, info.name, {
     onResult: (text) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text } }).then(() => toast("Résultat envoyé à Claude.")).catch((e) => toast(e.message, true)),
@@ -105,6 +106,22 @@ async function renderChatDetail(chatId) {
     if (m.cost != null) bar.cost = m.cost;
     if (m.tokens != null || m.cost != null) drawBar();
   });
+}
+
+// Tâches de fond de la conversation (sous-agents, commandes) : pastille dans l'en-tête, tenue à
+// jour avec le store ; le détail s'affiche au survol.
+function bgChip(box, sessionOf) {
+  const draw = () => {
+    const slot = box.querySelector(".bg-chip-slot");
+    if (!slot) return unsub?.();
+    const tasks = store.bg?.[sessionOf()] || [];
+    if (!tasks.length) { slot.innerHTML = ""; return; }
+    const agents = tasks.filter((t) => t.kind === "agent").length, shells = tasks.length - agents;
+    const since = (t) => (t.started ? ` (depuis ${ago(Date.parse(t.started))})` : "");
+    slot.innerHTML = `<span class="chip bg-chip" title="${esc(tasks.map((t) => `${t.kind === "agent" ? "Sous-agent" : "Commande"} : ${t.label}${since(t)}`).join("\n"))}">${icon("agent")} ${[agents && `${agents} sous-agent${agents > 1 ? "s" : ""}`, shells && `${shells} commande${shells > 1 ? "s" : ""}`].filter(Boolean).join(" · ")} en arrière-plan</span>`;
+  };
+  const unsub = subscribe(draw);
+  draw();
 }
 
 // Retard de la branche sur sa base (calcul local) : pastille dans l'en-tête, qui ouvre le
@@ -176,7 +193,7 @@ async function renderDetail(sid, tab) {
         <button class="btn icon-only" id="resume" title="Ouvrir dans Terminal">${icon("terminal")}</button>
         <button class="btn icon-only" id="conv-gh" title="GitHub : PR, CI, relectures">${icon("github")}</button>
       </div>
-      <div class="meta">${slotChip(conv.slot)}<span>${ago(conv.last_ts)}</span>${conv.branch ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(conv.branch)}</span>` : ""}${conv.cost_usd != null ? `<span>${usd(conv.cost_usd)}</span>` : ""}<span id="conv-bar"></span><span class="rebase-chip-slot"></span></div>
+      <div class="meta">${slotChip(conv.slot)}<span>${ago(conv.last_ts)}</span>${conv.branch ? `<span>${icon("branch").replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"')} ${esc(conv.branch)}</span>` : ""}${conv.cost_usd != null ? `<span>${usd(conv.cost_usd)}</span>` : ""}<span id="conv-bar"></span><span class="rebase-chip-slot"></span><span class="bg-chip-slot"></span></div>
       <div class="tabs" role="tablist">
         <button class="tab${tab === "conv" ? " on" : ""}" data-tab="conv" role="tab">Conversation</button>
         <button class="tab${tab === "analyse" ? " on" : ""}" data-tab="analyse" role="tab">Analyse</button>
@@ -205,6 +222,7 @@ async function renderDetail(sid, tab) {
   $("#conv-review", box).addEventListener("click", () => openReview({ session: sid }, conv.title || ""));
   $("#conv-gh", box).addEventListener("click", () => openGithub({ session: sid }, conv.title || "", { toClaude: (text) => toDraft(sid, text) }));
   rebaseChip(box, { session: sid }, "#conv-gh");
+  bgChip(box, () => sid);
   $("#conv-run", box).addEventListener("click", () => openRun({ session: sid }, conv.repo_id, conv.title || "", {
     onResult: (text) => { toDraft(sid, text); toast("Résultat déposé dans la saisie."); },
   }));

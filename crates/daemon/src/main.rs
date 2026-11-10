@@ -2,6 +2,7 @@
 //! L'interface ne connaît que ce protocole HTTP/JSON : le démon peut être
 //! réécrit dans un autre langage sans la toucher.
 
+mod bg;
 mod chat;
 mod claude_update;
 mod commands;
@@ -1300,6 +1301,7 @@ async fn main() -> Result<()> {
         .route("/api/commands", get(side::commands))
         .route("/api/btw", post(side::btw))
         .route("/api/events", get(events))
+        .route("/api/background", get(bg::route))
         .route("/api/usage/refresh", post(usage_cmd::refresh))
         .route("/api/claude-update", get(claude_update::route))
         .route("/api/claude-update/run", post(claude_update::run))
