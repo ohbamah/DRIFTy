@@ -1,4 +1,4 @@
-// Claudius pour macOS : une fenêtre native autour de l'interface servie par
+// DRIFTy pour macOS : une fenêtre native autour de l'interface servie par
 // `claudiusd`. L'app réutilise un démon qui répond déjà ; sinon elle lance
 // celui du bundle (Contents/MacOS/claudiusd) et n'arrête que celui-là.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -103,7 +103,7 @@ fn build_window(app: &tauri::AppHandle, origin: Url) -> tauri::Result<WebviewWin
     let nav_origin = origin.clone();
     let popup_app = app.clone();
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("Claudius")
+        .title("DRIFTy")
         .inner_size(1320.0, 860.0)
         .min_inner_size(900.0, 560.0)
         .center()
@@ -139,7 +139,7 @@ fn is_internal(url: &Url, origin: &Url) -> bool {
 
 fn open_external(app: &tauri::AppHandle, url: &Url) {
     if let Err(e) = app.opener().open_url(url.as_str(), None::<&str>) {
-        eprintln!("Claudius : impossible d'ouvrir {url} : {e}");
+        eprintln!("DRIFTy : impossible d'ouvrir {url} : {e}");
     }
 }
 
@@ -171,7 +171,7 @@ fn js_string(s: &str) -> String {
 
 // ------------------------------------------------------------------ démon
 
-/// `GET /api/status` répond 200 : un démon Claudius écoute à cette adresse.
+/// `GET /api/status` répond 200 : un démon DRIFTy écoute à cette adresse.
 fn daemon_alive(addr: &str) -> bool {
     let Some(sock) = addr.to_socket_addrs().ok().and_then(|mut a| a.next()) else { return false };
     let Ok(mut s) = TcpStream::connect_timeout(&sock, Duration::from_millis(400)) else { return false };
@@ -194,7 +194,7 @@ fn daemon_alive(addr: &str) -> bool {
 
 fn ensure_daemon(app: &tauri::AppHandle, addr: &str) -> Result<(), String> {
     if daemon_alive(addr) {
-        eprintln!("Claudius : démon existant sur {addr}, réutilisé.");
+        eprintln!("DRIFTy : démon existant sur {addr}, réutilisé.");
         return Ok(());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -214,7 +214,7 @@ fn ensure_daemon(app: &tauri::AppHandle, addr: &str) -> Result<(), String> {
         cmd.env("PATH", path);
     }
     let mut child = cmd.spawn().map_err(|e| format!("lancement de {} : {e}", bin.display()))?;
-    eprintln!("Claudius : démon lancé (PID {}) sur {addr}, journal {}", child.id(), log.display());
+    eprintln!("DRIFTy : démon lancé (PID {}) sur {addr}, journal {}", child.id(), log.display());
 
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
@@ -251,7 +251,7 @@ fn stop_own_daemon(app: &tauri::AppHandle) {
 }
 
 fn log_path() -> PathBuf {
-    let dir = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Library/Logs/Claudius");
+    let dir = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Library/Logs/DRIFTy");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("claudiusd.log")
 }

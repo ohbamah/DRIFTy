@@ -37,7 +37,7 @@ export function editProject(repo, hint = "") {
     <label>Son « autorisation demandée »<span class="snd-row"><select class="field" id="snd-permission"></select><button class="icon-btn" type="button" data-play="snd-permission">▶</button></span></label>
     <div class="setup-field">
       <div class="setup-head"><b>Mise en place d'un nouveau worktree</b><span style="flex:1"></span><button class="btn small" type="button" id="setup-ai">${icon("sparkle")}Proposer par l'IA</button></div>
-      <textarea class="field area mono" id="setup" rows="6" wrap="off" spellcheck="false" placeholder="# Lancé par bash -e dans chaque nouveau worktree, avant le premier message.\n# cp \"$CLAUDIUS_ROOT_PATH/.env\" .env\n# bundle install"></textarea>
+      <textarea class="field area mono" id="setup" rows="6" wrap="off" spellcheck="false" placeholder="# Vide : aucun script. Lancé par bash -e dans chaque nouveau worktree.&#10;# cp &quot;$CLAUDIUS_ROOT_PATH/.env&quot; .env&#10;# bundle install"></textarea>
       <div class="muted small" id="setup-why">Variables : <code>$CLAUDIUS_ROOT_PATH</code> (dossier principal), <code>$CLAUDIUS_WORKSPACE_NAME</code>, <code>$PORT</code>. Les scripts Conductor marchent tels quels.</div>
     </div>
     <label class="check"><input type="checkbox" id="hidden"${repo.hidden ? " checked" : ""}> Masquer</label>
@@ -58,8 +58,10 @@ export function editProject(repo, hint = "") {
       play(v, cfg.global.volume);
     }));
   });
-  // Script de mise en place : proposé par l'IA à la première ouverture (puis gardé comme proposition).
-  let setupLoaded = false;
+  // Script de mise en place : seul le script ENREGISTRÉ est lancé. L'IA ne propose que sur
+  // demande (bouton), jamais à l'ouverture ; sa proposition n'est qu'un brouillon dans le champ,
+  // qui ne devient le script qu'une fois relu et enregistré (champ modifié).
+  let setupLoaded = false, setupSaved = "";
   const setupTa = $("#setup", dlg), setupBtn = $("#setup-ai", dlg);
   const propose = async () => {
     setupBtn.disabled = true;
@@ -75,9 +77,8 @@ export function editProject(repo, hint = "") {
   setupBtn.addEventListener("click", propose);
   api(`/api/repos/${repo.id}/setup`).then((cfg) => {
     setupLoaded = true;
-    if (cfg.configured) setupTa.value = cfg.script || "";
-    else if (cfg.proposal) setupTa.value = cfg.proposal.script || "";
-    else propose();
+    setupSaved = cfg.configured ? cfg.script || "" : "";
+    setupTa.value = setupSaved;
   }).catch(() => {});
   const preview = () => ($("#preview", dlg).innerHTML = logo({ ...repo, icon: iconValue, color, name: $("#name", dlg).value || repo.name }, "lg"));
   preview();
@@ -101,7 +102,7 @@ export function editProject(repo, hint = "") {
           method: "PUT",
           json: { name: $("#name", dlg).value, icon: iconValue, color, slot: $("#slot", dlg).value, hidden: $("#hidden", dlg).checked },
         }));
-        if (setupLoaded) await api(`/api/repos/${repo.id}/setup`, { method: "PUT", json: { script: setupTa.value } });
+        if (setupLoaded && setupTa.value.trim() !== setupSaved.trim()) await api(`/api/repos/${repo.id}/setup`, { method: "PUT", json: { script: setupTa.value } });
         const sounds = { done: $("#snd-done", dlg).value || null, permission: $("#snd-permission", dlg).value || null };
         await api(`/api/settings/notify/repo/${repo.id}`, { method: "PUT", json: { sounds } });
         await loadNotifyCfg(true);

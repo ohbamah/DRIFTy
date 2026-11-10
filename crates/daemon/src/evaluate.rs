@@ -1,6 +1,6 @@
 //! Évaluation d'une conversation par un agent : il reçoit le DIGEST (chiffres,
 //! causes, extraits, règles en place), jamais le transcript, et rend un rapport
-//! bref et actionnable. Son coût est une dépense propre de Claudius.
+//! bref et actionnable. Son coût est une dépense propre de DRIFTy.
 
 use crate::improve;
 use anyhow::Result;

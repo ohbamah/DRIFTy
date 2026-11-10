@@ -1,4 +1,4 @@
-//! Bilan : le gaspillage mesuré au fil du temps, et ce que Claudius dépense
+//! Bilan : le gaspillage mesuré au fil du temps, et ce que DRIFTy dépense
 //! lui-même. Le gaspillage d'une session vient du digest (un seul calcul).
 
 use crate::digest;
@@ -42,7 +42,7 @@ pub fn refresh(conn: &Connection) -> Result<usize> {
     Ok(todo.len())
 }
 
-/// Enregistre ce que Claudius a consommé lui-même (tokens qui n'existeraient pas sans l'app).
+/// Enregistre ce que DRIFTy a consommé lui-même (tokens qui n'existeraient pas sans l'app).
 pub fn record_spend(conn: &Connection, kind: &str, session_id: Option<&str>, input: i64, output: i64, cost_usd: Option<f64>) -> Result<()> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
     conn.execute(
@@ -75,7 +75,7 @@ pub fn summary(conn: &Connection) -> Result<Value> {
         })?
         .collect::<Result<_, _>>()?;
 
-    // Avant / après la mise en service de Claudius.
+    // Avant / après la mise en service de DRIFTy.
     let period = |cond: &str| -> Result<(i64, i64, i64)> {
         Ok(conn.query_row(
             &format!(

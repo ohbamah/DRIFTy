@@ -107,12 +107,12 @@ fn trigger_sync(app: &App) -> bool {
 }
 
 /// Une page web ouverte ailleurs peut viser 127.0.0.1 : toute requête qui
-/// modifie quelque chose doit venir de l'interface de Claudius elle-même.
+/// modifie quelque chose doit venir de l'interface de DRIFTy elle-même.
 async fn same_origin(State(app): State<App>, req: Request, next: Next) -> Response {
     if req.method() != Method::GET {
         let origin = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok());
         if origin != Some(app.origin.as_str()) {
-            return (StatusCode::FORBIDDEN, Json(json!({"error": "The request cannot be accepted because it does not come from the Claudius interface."})))
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "The request cannot be accepted because it does not come from the DRIFTy interface."})))
                 .into_response();
         }
     }
@@ -367,7 +367,7 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
                         |x| x.get(0),
                     )
                     .ok();
-                // Pas encore analysé (créé dans l'app) : emplacement des worktrees de Claudius.
+                // Pas encore analysé (créé dans l'app) : emplacement des worktrees de DRIFTy.
                 let dir_name = std::path::Path::new(&root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(repo_name.clone());
                 let own = chat::worktree_path(&dir_name, &wt);
                 let cwd = cwd
@@ -481,7 +481,7 @@ async fn review_pr(State(app): State<App>, Json(t): Json<ReviewTarget>) -> ApiRe
     Ok(Json(tokio::task::spawn_blocking(move || review::pull_request(&dir, false)).await??))
 }
 
-/// Message de commit proposé par l'IA d'après le diff (dépense propre de Claudius).
+/// Message de commit proposé par l'IA d'après le diff (dépense propre de DRIFTy).
 async fn review_message(State(app): State<App>, Json(t): Json<ReviewTarget>) -> ApiResult {
     let (dir, slot) = review_dir(&app, &t).await?;
     let summary = tokio::task::spawn_blocking(move || review::diff_for_message(&dir)).await??;
@@ -1120,7 +1120,7 @@ async fn main() -> Result<()> {
         .with_state(app);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("Claudius : http://{addr}  (base : {})", db_path.display());
+    eprintln!("DRIFTy : http://{addr}  (base : {})", db_path.display());
     axum::serve(listener, router).await?;
     Ok(())
 }

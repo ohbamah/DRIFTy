@@ -1,7 +1,7 @@
 //! Amélioration d'un prompt par Claude, à la demande. Appel minimal et isolé :
 //! aucun outil, aucune personnalisation (`--safe-mode`), aucune session écrite
 //! sur disque (sinon il apparaîtrait comme une conversation de l'utilisateur).
-//! Son coût est enregistré comme dépense propre de Claudius.
+//! Son coût est enregistré comme dépense propre de DRIFTy.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -34,7 +34,7 @@ pub async fn run(text: &str, project: Option<&str>, config_dir: Option<&str>) ->
 }
 
 /// Un appel isolé à Claude : dossier neutre, aucun outil, aucune personnalisation,
-/// aucune session écrite. Sert à tout ce que Claudius demande pour lui-même.
+/// aucune session écrite. Sert à tout ce que DRIFTy demande pour lui-même.
 pub async fn oneshot(system: &str, prompt: &str, config_dir: Option<&str>, model: &str, what: &str) -> Result<Improved> {
     let start = std::time::Instant::now();
     let dir = claudius_core::home().join(".claudius").join("improve");

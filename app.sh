@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Construit l'application macOS Claudius.app (Tauri v2), en release.
-#   ./app.sh            → app/target/release/bundle/macos/Claudius.app
+# Construit l'application macOS DRIFTy.app (Tauri v2), en release.
+#   ./app.sh            → app/target/release/bundle/macos/DRIFTy.app
 #   ./app.sh --open     → construit puis lance l'app
 #   ./app.sh --install  → construit puis copie l'app dans /Applications
 set -euo pipefail
@@ -22,10 +22,10 @@ cp target/release/claudiusd "app/binaries/claudiusd-$TRIPLE"
 # 2. L'app.
 (cd app && cargo tauri build --bundles app)
 
-APP="app/target/release/bundle/macos/Claudius.app"
-echo "Claudius.app : $APP"
+APP="app/target/release/bundle/macos/DRIFTy.app"
+echo "DRIFTy.app : $APP"
 
 case "${1:-}" in
   --open) open "$APP" ;;
-  --install) rm -rf /Applications/Claudius.app && cp -R "$APP" /Applications/ && echo "Installée dans /Applications." ;;
+  --install) rm -rf /Applications/DRIFTy.app && cp -R "$APP" /Applications/ && echo "Installée dans /Applications." ;;
 esac

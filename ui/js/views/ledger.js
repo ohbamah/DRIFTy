@@ -1,4 +1,4 @@
-// Bilan : ce que Claudius fait économiser face à ce qu'il dépense lui-même.
+// Bilan : ce que DRIFTy fait économiser face à ce qu'il dépense lui-même.
 import { api, esc, tok, num, pct, usd, syncButton, toast, logo, $ } from "../lib.js";
 import { store, ensureLoaded } from "../store.js";
 
@@ -38,7 +38,7 @@ export async function show(root) {
   });
 
   root.innerHTML = `<div class="page"><div class="page-in">
-    <div class="page-head"><div><h1>Bilan</h1><div class="sub">Économies face au coût de Claudius.</div></div>${syncButton()}</div>
+    <div class="page-head"><div><h1>Bilan</h1><div class="sub">Économies face au coût de DRIFTy.</div></div>${syncButton()}</div>
 
     <div class="panel ledger">
       <div class="side">
@@ -48,7 +48,7 @@ export async function show(root) {
       </div>
       <div class="beam">${beam(left, spent)}</div>
       <div class="side right">
-        <div class="k">Dépensé par Claudius</div>
+        <div class="k">Dépensé par DRIFTy</div>
         <div class="v">${tok(spent)}</div>
         <div class="muted small">${l.spend.runs ? `tokens, ${usd(l.spend.cost_usd)} sur ${num(l.spend.runs)} appels` : "tokens, analyses locales"}</div>
       </div>
@@ -68,7 +68,7 @@ export async function show(root) {
     </div>
 
     ${l.spend_by_kind.length ? `<div class="panel">
-      <h2>Dépenses de Claudius</h2>
+      <h2>Dépenses de DRIFTy</h2>
       <table class="data">
         <tr><th>Usage</th><th class="n">Appels</th><th class="n">Tokens</th><th class="n">Coût</th></tr>
         ${l.spend_by_kind.map((k) => `<tr><td>${esc(KIND[k.kind] || k.kind)}</td><td class="n">${num(k.runs)}</td><td class="n">${tok(k.input + k.output)}</td><td class="n">${usd(k.cost_usd)}</td></tr>`).join("")}

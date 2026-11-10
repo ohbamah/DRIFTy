@@ -3,7 +3,7 @@
 import { api, esc, icon, toast, loader, $ } from "./lib.js";
 import { ansiToHtml } from "./ansi.js";
 
-/** Panneau de sortie d'une exécution lancée par Claudius (mise en place d'un worktree…). */
+/** Panneau de sortie d'une exécution lancée par DRIFTy (mise en place d'un worktree…). */
 export function openJob(jobId, title) {
   document.querySelector(".review")?.remove();
   const panel = document.createElement("aside");

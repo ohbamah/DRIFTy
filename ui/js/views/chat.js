@@ -484,7 +484,7 @@ export async function renderLive(box, chatId, onMeta) {
         else group.html += `<div class="tool-run done"><span class="dot"></span><b>${esc(e.tool || "")}</b><span class="lbl">${esc(e.text)}</span>${diffStat(e.diff)}</div>`;
       }
       flush();
-      thread.insertAdjacentHTML("afterbegin", `${past.length > recent.length ? `<div class="event">${past.length - recent.length} éléments plus anciens non affichés</div>` : ""}${html}<div class="event">Reprise dans Claudius</div>`);
+      thread.insertAdjacentHTML("afterbegin", `${past.length > recent.length ? `<div class="event">${past.length - recent.length} éléments plus anciens non affichés</div>` : ""}${html}<div class="event">Reprise dans DRIFTy</div>`);
     } catch {}
   }
   // Gaspillage repéré en direct : un bandeau au-dessus de la saisie, avec l'action adaptée.

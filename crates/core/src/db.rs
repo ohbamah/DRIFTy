@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS session_waste (
     waste_ms       INTEGER NOT NULL
 );
 
--- Ce que Claudius dépense lui-même (évaluations par agent, etc.).
+-- Ce que DRIFTy dépense lui-même (évaluations par agent, etc.).
 CREATE TABLE IF NOT EXISTS claudius_spend (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            INTEGER NOT NULL,

@@ -69,7 +69,7 @@ function fixBlock(p) {
   const todo = p.entries.filter((e) => e.status !== "present");
   const LABEL = { new: "Nouvelle", updated: "Mise à jour", present: "Déjà là" };
   return `<div class="fix">
-    <div class="fix-head"><code>${esc(file)}</code>${p.file_exists ? "" : " (créé)"}, bloc Claudius : ${p.block_rules} règle${p.block_rules > 1 ? "s" : ""} sur ${p.block_max} au plus</div>
+    <div class="fix-head"><code>${esc(file)}</code>${p.file_exists ? "" : " (créé)"}, bloc DRIFTy : ${p.block_rules} règle${p.block_rules > 1 ? "s" : ""} sur ${p.block_max} au plus</div>
     <ul class="rules">
       ${p.entries.map((e) => `<li class="rule ${e.status === "present" ? "done" : ""}" data-raw="${esc(e.text)}"><span class="rule-tag">${LABEL[e.status]}</span>${inlineCode(e.text)}</li>`).join("")}
     </ul>

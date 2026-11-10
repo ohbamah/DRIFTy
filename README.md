@@ -1,4 +1,4 @@
-# Claudius
+# DRIFTy
 
 Tableau de bord local de l'usage de Claude Code : tokens, cache, coût, et
 **évaluation de chaque session** (où est passé le temps, ce qui est
@@ -22,7 +22,7 @@ Seul le bouton « Synchroniser » (ou `--sync-only`) relit les transcripts.
 ## Application macOS
 
 ```bash
-./app.sh             # → app/target/release/bundle/macos/Claudius.app
+./app.sh             # → app/target/release/bundle/macos/DRIFTy.app
 ./app.sh --open      # construit puis lance
 ./app.sh --install   # construit puis copie dans /Applications
 ```
@@ -33,11 +33,11 @@ vit dans `app/`, hors du workspace (le `cargo test` racine ne le voit pas).
 - Au lancement, l'app réutilise le démon qui répond sur `CLAUDIUS_ADDR`
   (défaut `127.0.0.1:4317`) ; sinon elle lance le `claudiusd` du bundle, avec
   le `PATH` du shell de connexion, et l'arrête en quittant (seulement
-  celui-là). Journal : `~/Library/Logs/Claudius/claudiusd.log`.
+  celui-là). Journal : `~/Library/Logs/DRIFTy/claudiusd.log`.
 - Notifications natives par le plugin Tauri ; liens externes dans le
   navigateur du système ; taille et position de la fenêtre mémorisées.
 - Essai sans toucher au démon courant :
-  `CLAUDIUS_ADDR=127.0.0.1:4398 CLAUDIUS_DB=/tmp/essai.db app/target/release/bundle/macos/Claudius.app/Contents/MacOS/Claudius`.
+  `CLAUDIUS_ADDR=127.0.0.1:4398 CLAUDIUS_DB=/tmp/essai.db app/target/release/bundle/macos/DRIFTy.app/Contents/MacOS/DRIFTy`.
 
 ## Architecture
 

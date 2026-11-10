@@ -1,7 +1,7 @@
 //! `claudiusd statusline --slot <compte> [-- <commande d'origine>]`
 //!
 //! Appelé par Claude Code à chaque mise à jour de sa statusline : relève
-//! `rate_limits` pour Claudius, puis rejoue la statusline d'origine avec la
+//! `rate_limits` pour DRIFTy, puis rejoue la statusline d'origine avec la
 //! même entrée et rend sa sortie telle quelle. Ne doit jamais casser la
 //! statusline : une erreur de relevé va sur stderr, jamais sur stdout.
 

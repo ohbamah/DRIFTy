@@ -1,7 +1,7 @@
 //! Optimiser : transforme une cause du digest en règles pour le `CLAUDE.md` du
 //! projet. Rien n'est écrit sans demande explicite (`apply`).
 //!
-//! Le bloc Claudius ne peut pas grossir sans fin : il ne contient que des
+//! Le bloc DRIFTy ne peut pas grossir sans fin : il ne contient que des
 //! règles d'un CATALOGUE fini, au plus une ligne par type, repérée par une clé
 //! stable. Réappliquer met une règle à jour (ses exemples fusionnent, plafonnés)
 //! au lieu de l'ajouter une seconde fois. Taille maximale = taille du catalogue.
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 const START: &str = "<!-- claudius:start -->";
 const END: &str = "<!-- claudius:end -->";
-const HEADING: &str = "## Règles ajoutées par Claudius";
+const HEADING: &str = "## Règles ajoutées par DRIFTy";
 /// Exemples gardés au plus par règle (les plus récents d'abord).
 const MAX_ITEMS: usize = 5;
 
@@ -192,7 +192,7 @@ fn claude_md(conn: &Connection, sid: &str) -> Result<(PathBuf, i64, String)> {
     Ok((Path::new(&root).join("CLAUDE.md"), repo_id, name))
 }
 
-/// Le bloc Claudius actuel : règles reconnues (clé → exemples) et lignes inconnues gardées telles quelles.
+/// Le bloc DRIFTy actuel : règles reconnues (clé → exemples) et lignes inconnues gardées telles quelles.
 struct Block {
     rules: BTreeMap<String, Vec<String>>,
     foreign: Vec<String>,
@@ -317,9 +317,9 @@ pub fn propose(conn: &Connection, sid: &str, cause_id: &str) -> Result<Value> {
     }))
 }
 
-/// Réécrit le bloc Claudius : une ligne par règle du catalogue, dans l'ordre du
+/// Réécrit le bloc DRIFTy : une ligne par règle du catalogue, dans l'ordre du
 /// catalogue ; les lignes inconnues (écrites à la main) sont gardées à la fin.
-/// Réécrit le bloc Claudius du texte (un seul point d'écriture) : une ligne par règle,
+/// Réécrit le bloc DRIFTy du texte (un seul point d'écriture) : une ligne par règle,
 /// dans l'ordre du catalogue, puis les lignes écrites à la main. Le reste du fichier ne bouge pas.
 fn rewrite(text: &str, block: &Block) -> String {
     let mut body = String::new();
@@ -340,17 +340,17 @@ fn rewrite(text: &str, block: &Block) -> String {
     }
 }
 
-/// Les règles du bloc Claudius d'un texte : (clé, texte affiché), dans l'ordre du catalogue.
+/// Les règles du bloc DRIFTy d'un texte : (clé, texte affiché), dans l'ordre du catalogue.
 pub fn block_rules(text: &str) -> Vec<(String, String)> {
     let block = parse_block(text);
     CATALOGUE.iter().filter(|k| block.rules.contains_key(k.key)).map(|k| (k.key.to_string(), render(k.key, &block.rules[k.key]))).collect()
 }
 
-/// Le texte sans la règle `key` dans son bloc Claudius.
+/// Le texte sans la règle `key` dans son bloc DRIFTy.
 pub fn without_rule(text: &str, key: &str) -> Result<String> {
     let mut block = parse_block(text);
     if block.rules.remove(key).is_none() {
-        anyhow::bail!("The rule `{key}` cannot be removed because it is not in the Claudius block.");
+        anyhow::bail!("The rule `{key}` cannot be removed because it is not in the DRIFTy block.");
     }
     Ok(rewrite(text, &block))
 }

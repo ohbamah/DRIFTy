@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lance Claudius : compile si besoin, démarre le démon, ouvre l'interface.
+# Lance DRIFTy : compile si besoin, démarre le démon, ouvre l'interface.
 #   ./run.sh              → http://127.0.0.1:4317
 #   ./run.sh --no-open    → sans ouvrir le navigateur
 #   CLAUDIUS_ADDR=127.0.0.1:5000 ./run.sh
@@ -18,7 +18,7 @@ export CLAUDIUS_ADDR="$ADDR"
 URL="http://$ADDR"
 
 if curl -sf "$URL/api/status" >/dev/null 2>&1; then
-  echo "Claudius tourne déjà sur $URL"
+  echo "DRIFTy tourne déjà sur $URL"
   [[ "${1:-}" != "--no-open" ]] && open "$URL"
   exit 0
 fi
@@ -36,5 +36,5 @@ for _ in $(seq 50); do
 done
 
 [[ "${1:-}" != "--no-open" ]] && open "$URL"
-echo "Claudius : $URL  (Ctrl-C pour arrêter)"
+echo "DRIFTy : $URL  (Ctrl-C pour arrêter)"
 wait "$PID"

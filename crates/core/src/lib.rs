@@ -1,4 +1,4 @@
-//! Claudius — noyau : ingestion des transcripts Claude Code, base SQLite,
+//! DRIFTy — noyau : ingestion des transcripts Claude Code, base SQLite,
 //! requêtes d'analyse et digest d'évaluation (étage 1, sans token).
 
 pub mod db;

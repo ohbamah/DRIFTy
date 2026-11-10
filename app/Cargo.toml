@@ -2,7 +2,7 @@
 name = "claudius-app"
 version = "0.1.0"
 edition = "2021"
-description = "Claudius : application macOS (coquille Tauri autour de claudiusd)"
+description = "DRIFTy : application macOS (coquille Tauri autour de claudiusd)"
 
 # Projet indépendant du workspace racine : il ne recompile pas le démon et
 # le workspace racine (cargo test) ne le voit pas.

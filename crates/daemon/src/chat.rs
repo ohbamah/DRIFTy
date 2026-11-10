@@ -268,7 +268,7 @@ impl Chat {
         let response = if allow {
             json!({"behavior": "allow", "updatedInput": req["input"].clone()})
         } else {
-            json!({"behavior": "deny", "message": "Refusé depuis Claudius."})
+            json!({"behavior": "deny", "message": "Refusé depuis DRIFTy."})
         };
         self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}}))
             .await?;
@@ -551,7 +551,7 @@ impl Watch {
     }
 }
 
-/// Emplacement des worktrees créés par Claudius : `~/claudius/worktrees/<dépôt>/<nom>` (un seul point).
+/// Emplacement des worktrees créés par DRIFTy : `~/claudius/worktrees/<dépôt>/<nom>` (un seul point).
 pub fn worktree_path(repo_name: &str, name: &str) -> std::path::PathBuf {
     claudius_core::home().join("claudius").join("worktrees").join(repo_name).join(name)
 }

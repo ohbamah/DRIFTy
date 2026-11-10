@@ -174,7 +174,7 @@ async function drawUsage() {
 // ------------------------------------------------------------ montage
 export async function mountSidebar(el) {
   el.innerHTML = `
-    <div class="sb-head" data-tauri-drag-region="deep"><span class="sb-brand">${document.getElementById("mark-tpl")?.innerHTML || ""}Claudius</span>
+    <div class="sb-head" data-tauri-drag-region="deep"><span class="sb-brand">${document.getElementById("mark-tpl")?.innerHTML || ""}<span class="brand-word">DRIFT<i>y</i></span></span>
       <button class="icon-btn" id="sb-toggle" title="Masquer la barre">${icon("sidebar")}</button></div>
     <label class="sb-search">${icon("search")}<input id="sb-q" placeholder="Rechercher" autocomplete="off"></label>
     <nav class="sb-nav">

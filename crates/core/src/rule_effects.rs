@@ -1,4 +1,4 @@
-//! Effet de chaque règle du bloc Claudius d'un CLAUDE.md : le gaspillage
+//! Effet de chaque règle du bloc DRIFTy d'un CLAUDE.md : le gaspillage
 //! qu'elle vise, avant / après sa mise en place. Une règle sans effet peut
 //! être retirée : le CLAUDE.md ne garde que ce qui sert.
 
@@ -85,7 +85,7 @@ fn claude_md(conn: &Connection, repo_id: i64) -> Result<std::path::PathBuf> {
     Ok(Path::new(&root).join("CLAUDE.md"))
 }
 
-/// Les règles du bloc Claudius d'un projet, avec leur effet mesuré.
+/// Les règles du bloc DRIFTy d'un projet, avec leur effet mesuré.
 pub fn list(conn: &Connection, repo_id: i64) -> Result<Value> {
     let path = claude_md(conn, repo_id)?;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -129,7 +129,7 @@ pub fn list(conn: &Connection, repo_id: i64) -> Result<Value> {
     Ok(json!({"path": path, "rules": out}))
 }
 
-/// Retire une règle du bloc Claudius du projet.
+/// Retire une règle du bloc DRIFTy du projet.
 pub fn remove(conn: &Connection, repo_id: i64, key: &str) -> Result<()> {
     let path = claude_md(conn, repo_id)?;
     let text = std::fs::read_to_string(&path)?;
