@@ -2,6 +2,7 @@
 //! L'interface ne connaît que ce protocole HTTP/JSON : le démon peut être
 //! réécrit dans un autre langage sans la toucher.
 
+mod bang;
 mod bg;
 mod chat;
 mod claude_update;
@@ -329,22 +330,53 @@ struct ChatDecision {
     allow: bool,
     /// Réponses à des questions (`AskUserQuestion`) : question → choix.
     answers: Option<Value>,
+    /// Plan approuvé : mode d'autorisation de la suite (`acceptEdits` ou `default`).
+    mode: Option<String>,
     /// Motif d'un refus, lu par Claude.
     message: Option<String>,
 }
 
 /// Prépare le lancement (base + git), sans rien démarrer.
+/// Compte qui détient le transcript `sid` et dossier de la conversation (premier `cwd` lu).
+fn transcript_origin(c: &Connection, sid: &str) -> Result<Option<(Option<String>, String)>> {
+    use std::io::BufRead;
+    for a in drifty_core::db::accounts(c)? {
+        let Ok(projects) = std::fs::read_dir(std::path::Path::new(&a.config_dir).join("projects")) else { continue };
+        for p in projects.flatten() {
+            let f = p.path().join(format!("{sid}.jsonl"));
+            let Ok(file) = std::fs::File::open(&f) else { continue };
+            let cwd = std::io::BufReader::new(file).lines().take(200).map_while(Result::ok).find_map(|l| {
+                serde_json::from_str::<Value>(&l).ok().and_then(|v| v["cwd"].as_str().map(str::to_string))
+            });
+            return Ok(Some((cwd, a.slot)));
+        }
+    }
+    Ok(None)
+}
+
 fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
     if let Some(sid) = &r.session_id {
         // Reprise : dossier d'origine, compte qui détient le transcript.
-        let (cwd, slot, title, repo_id): (Option<String>, Option<String>, Option<String>, Option<i64>) = c.query_row(
+        // Conversation pas encore analysée (absente de la base) : son transcript dit son dossier
+        // et le compte qui le détient.
+        let known = c.query_row(
             "SELECT s.cwd, s.slot,
                     COALESCE(s.title, (SELECT t.preview FROM turns t WHERE t.session_id = s.id AND t.kind = 'prompt' AND t.agent_id = '' ORDER BY t.ts LIMIT 1)),
                     m.repo_id
              FROM sessions s LEFT JOIN cwd_map m ON m.cwd = s.cwd WHERE s.id = ?1",
             rusqlite::params![sid],
             |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?)),
-        )?;
+        );
+        let (cwd, slot, title, repo_id): (Option<String>, Option<String>, Option<String>, Option<i64>) = match known {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let (cwd, slot) = transcript_origin(c, sid)?
+                    .ok_or_else(|| anyhow::anyhow!("The conversation `{sid}` cannot be continued because no account holds its transcript."))?;
+                let repo_id = cwd.as_deref().and_then(|d| c.query_row("SELECT repo_id FROM cwd_map WHERE cwd = ?1", rusqlite::params![d], |x| x.get(0)).ok());
+                (cwd, Some(slot), None, repo_id)
+            }
+            Err(e) => return Err(e.into()),
+        };
         let cwd = cwd.ok_or_else(|| anyhow::anyhow!("The conversation cannot be continued because its folder is unknown."))?;
         if !std::path::Path::new(&cwd).is_dir() {
             anyhow::bail!("The conversation cannot be continued because its folder `{cwd}` no longer exists.");
@@ -399,7 +431,8 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
     let (cwd, worktree) = match mode.as_str() {
         "worktree" => {
             let dir_name = std::path::Path::new(&root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(repo_name.clone());
-            (chat::create_worktree(&root, &dir_name, &name)?, Some(name.clone()))
+            let wt = chat::worktree_slug(&name); // « Silencieux 2 décisions » → « Silencieux-2-decisions »
+            (chat::create_worktree(&root, &dir_name, &wt)?, Some(wt))
         }
         "project" => (root.clone(), None),
         // Worktree déjà connu du projet : son dossier racine (sous-dossier en dernier recours).
@@ -825,7 +858,17 @@ async fn chat_start(State(app): State<App>, Json(r): Json<NewChat>) -> ApiResult
 }
 
 async fn chat_bash(State(app): State<App>, Path(id): Path<String>, Json(t): Json<ChatText>) -> ApiResult {
-    app.chats.get(&id)?.bash(&t.text).await?;
+    let bid = app.chats.get(&id)?.bash(&t.text)?;
+    Ok(Json(json!({"id": bid})))
+}
+
+async fn chat_bash_input(State(app): State<App>, Path((id, bid)): Path<(String, String)>, Json(t): Json<ChatText>) -> ApiResult {
+    app.chats.get(&id)?.bash_input(&bid, &t.text).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn chat_bash_stop(State(app): State<App>, Path((id, bid)): Path<(String, String)>) -> ApiResult {
+    app.chats.get(&id)?.bash_stop(&bid)?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -835,7 +878,7 @@ async fn chat_send(State(app): State<App>, Path(id): Path<String>, Json(t): Json
 }
 
 async fn chat_decide(State(app): State<App>, Path(id): Path<String>, Json(d): Json<ChatDecision>) -> ApiResult {
-    app.chats.get(&id)?.decide(&d.request_id, d.allow, d.answers, d.message).await?;
+    app.chats.get(&id)?.decide(&d.request_id, d.allow, d.answers, d.mode, d.message).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1304,6 +1347,8 @@ async fn main() -> Result<()> {
         .route("/api/chats/{id}/events", get(chat_events))
         .route("/api/chats/{id}/send", post(chat_send))
         .route("/api/chats/{id}/bash", post(chat_bash))
+        .route("/api/chats/{id}/bash/{bid}/stop", post(chat_bash_stop))
+        .route("/api/chats/{id}/bash/{bid}/input", post(chat_bash_input))
         .route("/api/chats/{id}/permission", post(chat_decide))
         .route("/api/chats/{id}/stop", post(chat_stop))
         .route("/api/chats/{id}/model", post(chat_set_model))

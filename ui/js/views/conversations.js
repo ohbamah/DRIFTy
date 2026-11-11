@@ -253,16 +253,27 @@ async function renderBody(body, sid, tab) {
       if (!body.isConnected || detailKey !== sid + "|conv") return;
       // Continuer ici : relance la conversation dans un chat de l'app (même dossier, même compte).
       let model = "", repoOfConv = null;
-      const comp = composer("Continuer cette conversation…", async (text, images) => {
+      // Reprise ici (avec ou sans premier message), après avoir vérifié qu'elle ne tourne pas ailleurs.
+      const resumeHere = async (body) => {
         const act = await api(`/api/sessions/${sid}/activity`).catch(() => ({}));
         if (act.last_write_ms_ago != null && act.last_write_ms_ago < 120000) {
           const secs = Math.round(act.last_write_ms_ago / 1000);
           const ok = await confirmBox(`Cette conversation a été écrite il y a ${secs} s : elle est sans doute ouverte ailleurs (terminal ou autre). La reprendre ici fera travailler deux agents dans la même conversation. Continuer quand même ?`);
           if (!ok) throw new Error("Reprise annulée.");
         }
-        const chat = await api("/api/chats", { method: "POST", json: { session_id: sid, text, images, bypass: true, model: model || null } });
+        return api("/api/chats", { method: "POST", json: { session_id: sid, bypass: true, model: model || null, ...body } });
+      };
+      const comp = composer("Continuer cette conversation… (! pour une commande shell)", async (text, images) => {
+        const chat = await resumeHere({ text, images });
         nav({ c: chat.id, s: null, t: null });
       }, {
+        // `!commande` : la conversation est reprise ici, la commande y tourne, sa sortie part avec
+        // le premier message.
+        bash: async (cmd) => {
+          const chat = await resumeHere({});
+          await api(`/api/chats/${chat.id}/bash`, { method: "POST", json: { text: cmd } });
+          nav({ c: chat.id, s: null, t: null });
+        },
         draftKey: "s:" + sid, onStop: () => {}, improve: () => ({ session_id: sid }), // stop affiché, grisé : rien ne tourne ici
         prompts: { repoId: () => repoOfConv },
         slash: () => ({ session: sid }),

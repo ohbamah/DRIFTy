@@ -14,7 +14,13 @@
 //! Tour en cours (`busy`) : Claude écrit ou réfléchit. Un tour commence à tout message
 //! `user` (demande, résultat d'outil, notification de tâche) et finit à `turn_duration`, à
 //! un message `assistant` `end_turn` ou à une interruption. Un transcript resté muet plus de
-//! `BUSY_SILENCE` n'est plus tenu pour actif (session tuée en plein tour).
+//! `BUSY_SILENCE` n'est plus tenu pour actif (session tuée en plein tour). Ne démarrent PAS de
+//! tour : les messages méta et ce que le terminal écrit sans le donner à Claude (commandes
+//! locales comme `/exit`, leur sortie, les commandes `!`).
+//!
+//! Attente (`waiting`) : une question (`AskUserQuestion`) ou un plan (`ExitPlanMode`) posé et
+//! encore sans résultat. Les autorisations du terminal ne laissent pas de trace distincte d'un
+//! outil qui tourne : elles ne sont pas vues.
 
 use axum::extract::State;
 use axum::Json;
@@ -58,6 +64,8 @@ struct FileState {
     tasks: HashMap<String, Task>,
     /// Un tour de Claude est en cours (voir l'en-tête).
     busy: bool,
+    /// Questions et plans posés à l'utilisateur, sans réponse encore (identifiants d'appel).
+    asking: std::collections::HashSet<String>,
 }
 
 static FILES: Mutex<Option<HashMap<PathBuf, FileState>>> = Mutex::new(None);
@@ -82,6 +90,8 @@ fn turn_state(st: &mut FileState, line: &str) {
         t: Option<String>,
         subtype: Option<String>,
         message: Option<Msg>,
+        #[serde(rename = "isMeta", default)]
+        is_meta: bool,
     }
     // Filtre bon marché avant décodage : seules ces lignes peuvent changer l'état.
     if !(line.contains("\"user\"") || line.contains("turn_duration") || line.contains("end_turn")) {
@@ -90,15 +100,29 @@ fn turn_state(st: &mut FileState, line: &str) {
     let Ok(h) = serde_json::from_str::<Head>(line) else { return };
     match (h.t.as_deref(), h.subtype.as_deref()) {
         (Some("user"), _) => {
+            if h.is_meta {
+                return;
+            }
             let c = h.message.and_then(|m| m.content);
             let text = match &c {
                 Some(Value::String(s)) => s.as_str(),
                 Some(Value::Array(a)) => a.first().and_then(|b| b["text"].as_str()).unwrap_or(""),
                 _ => "",
             };
+            // Écrit par le terminal, pas envoyé à Claude : aucun tour ne commence.
+            const LOCAL: [&str; 5] = ["<command-name>", "<local-command-", "<bash-input>", "<bash-stdout>", "<bash-stderr>"];
+            if LOCAL.iter().any(|p| text.trim_start().starts_with(p)) {
+                return;
+            }
             st.busy = !text.starts_with("[Request interrupted");
+            if !st.busy {
+                st.asking.clear();
+            }
         }
-        (Some("system"), Some("turn_duration")) => st.busy = false,
+        (Some("system"), Some("turn_duration")) => {
+            st.busy = false;
+            st.asking.clear();
+        }
         (Some("assistant"), _) if h.message.and_then(|m| m.stop_reason).as_deref() == Some("end_turn") => st.busy = false,
         _ => {}
     }
@@ -142,6 +166,8 @@ fn apply(st: &mut FileState, line: &str) {
                 let label = input["description"].as_str().or(input["command"].as_str()).unwrap_or(name).chars().take(120).collect::<String>();
                 if name == "Bash" && input["run_in_background"] == true {
                     st.tasks.insert(id.into(), Task { kind: "shell", label, started: ts.clone(), pending: false, ids: vec![], output: None, watches: vec![], until: None });
+                } else if name == "AskUserQuestion" || name == "ExitPlanMode" {
+                    st.asking.insert(id.to_string());
                 } else if name == "Agent" || name == "Task" {
                     st.tasks.insert(id.into(), Task { kind: "agent", label, started: ts.clone(), pending: true, ids: vec![], output: None, watches: vec![], until: None });
                 } else if name == "Monitor" {
@@ -160,6 +186,7 @@ fn apply(st: &mut FileState, line: &str) {
             }
             Some("tool_result") => {
                 let id = b["tool_use_id"].as_str().unwrap_or("");
+                st.asking.remove(id);
                 let Some(t) = st.tasks.get_mut(id) else { continue };
                 let r = &v["toolUseResult"];
                 for k in ["backgroundTaskId", "agentId", "agent_id", "name", "teammate_id", "taskId"] {
@@ -229,6 +256,7 @@ pub async fn route(State(app): State<App>) -> ApiResult {
         let files = files.get_or_insert_with(HashMap::new);
         let mut out = Map::new();
         let mut busy: Vec<String> = vec![];
+        let mut waiting: Vec<String> = vec![];
         for d in dirs {
             let Ok(projects) = std::fs::read_dir(PathBuf::from(&d).join("projects")) else { continue };
             for p in projects.flatten() {
@@ -247,7 +275,9 @@ pub async fn route(State(app): State<App>) -> ApiResult {
                     let st = files.entry(path.clone()).or_default();
                     update(&path, st);
                     let sid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                    if st.busy && age.is_some_and(|a| a < BUSY_SILENCE) {
+                    if !st.asking.is_empty() {
+                        waiting.push(sid.clone()); // attend l'utilisateur, sans limite de durée
+                    } else if st.busy && age.is_some_and(|a| a < BUSY_SILENCE) {
                         busy.push(sid.clone());
                     }
                     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -271,7 +301,7 @@ pub async fn route(State(app): State<App>) -> ApiResult {
                 }
             }
         }
-        json!({"tasks": out, "busy": busy})
+        json!({"tasks": out, "busy": busy, "waiting": waiting})
     })
     .await?;
     Ok(Json(out))
@@ -299,6 +329,41 @@ mod tests {
         assert!(!st.busy);
         super::apply(&mut st, r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#);
         assert!(!st.busy);
+    }
+
+    #[test]
+    fn local_commands_do_not_start_a_turn() {
+        // Fin réelle d'une session du terminal : réponse finie, puis `/exit` (mesuré le 2026-11-10).
+        let mut st = super::FileState::default();
+        for l in [
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+            r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>The command below…</local-command-caveat>"}}"#,
+            r#"{"type":"user","message":{"content":"<command-name>/exit</command-name>\n<command-message>exit</command-message>"}}"#,
+            r#"{"type":"user","message":{"content":"<local-command-stdout>(no content)</local-command-stdout>"}}"#,
+            r#"{"type":"user","message":{"content":"<bash-input>ls</bash-input>"}}"#,
+            r#"{"type":"user","message":{"content":"<bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>"}}"#,
+        ] {
+            super::apply(&mut st, l);
+        }
+        assert!(!st.busy);
+        // Une notification de tâche, elle, fait répondre Claude.
+        super::apply(&mut st, r#"{"type":"user","message":{"content":"<task-notification><status>completed</status></task-notification>"}}"#);
+        assert!(st.busy);
+    }
+
+    #[test]
+    fn question_waits_until_answered() {
+        let mut st = super::FileState::default();
+        super::apply(&mut st, r#"{"type":"user","message":{"content":"Pose-moi une question"}}"#);
+        super::apply(&mut st, r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#);
+        assert!(st.asking.contains("q1"));
+        super::apply(&mut st, r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"q1","content":"Rouge"}]}}"#);
+        assert!(st.asking.is_empty() && st.busy);
+        // Plan posé puis tour interrompu : plus d'attente.
+        super::apply(&mut st, r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"p1","name":"ExitPlanMode","input":{}}]}}"#);
+        assert!(st.asking.contains("p1"));
+        super::apply(&mut st, r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#);
+        assert!(st.asking.is_empty() && !st.busy);
     }
 
     #[test]

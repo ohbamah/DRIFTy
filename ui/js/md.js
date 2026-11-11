@@ -1,5 +1,9 @@
 // Rendu Markdown minimal et sûr (tout est échappé avant mise en forme).
-import { esc } from "./lib.js";
+import { esc } from "./text.js";
+import { icon } from "./icons.js";
+
+// Bloc de code : boutons Copier (partout, voir main.js) et Transférer (dans une réponse, voir reply.js).
+const codeActions = `<div class="code-actions"><button type="button" data-code-copy title="Copier le code" aria-label="Copier le code">${icon("copy")}</button><button type="button" data-code-transfer title="Transférer le code vers une autre conversation" aria-label="Transférer le code">${icon("forward")}</button></div>`;
 
 function inline(s) {
   return s
@@ -19,7 +23,7 @@ export function md(src) {
       i++;
       while (i < lines.length && !lines[i].startsWith("```")) buf.push(lines[i++]);
       i++;
-      out.push(`<pre><code>${esc(buf.join("\n"))}</code></pre>`);
+      out.push(`<div class="code-block">${codeActions}<pre><code>${esc(buf.join("\n"))}</code></pre></div>`);
       continue;
     }
     if (/^\s*\|.*\|\s*$/.test(line)) {
@@ -46,7 +50,9 @@ export function md(src) {
       i++;
       continue;
     }
-    const para = [];
+    // La 1re ligne est toujours prise : une ligne qu'aucun bloc ne reconnaît (`| a` sans `|`
+    // final, une ligne de tableau à moitié écrite) bouclait ici sans fin et figeait la page.
+    const para = [lines[i++]];
     while (i < lines.length && lines[i].trim() && !/^(```|#{1,4} |\s*[-*] |\s*\|)/.test(lines[i])) para.push(lines[i++]);
     out.push(`<p>${inline(esc(para.join("\n"))).replace(/\n/g, "<br>")}</p>`);
   }

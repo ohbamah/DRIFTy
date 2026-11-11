@@ -173,6 +173,18 @@ struct Group {
     last_ts: Option<i64>,
 }
 
+/// Worktrees créés par DRIFTy (`~/drifty/worktrees/…`, ou l'ancien `~/claudius/worktrees/…`)
+/// encore présents dans `git worktree list --porcelain` : leurs noms.
+fn app_worktrees(porcelain: &str, home: &Path) -> Vec<String> {
+    let bases = [home.join("drifty").join("worktrees"), home.join("claudius").join("worktrees")];
+    porcelain
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .filter(|p| bases.iter().any(|b| Path::new(p).starts_with(b)))
+        .map(basename)
+        .collect()
+}
+
 /// Les projets, avec leurs sous-groupes (worktree / sous-dossier) et leurs totaux.
 pub fn list(conn: &Connection) -> Result<Value> {
     let mut st = conn.prepare(
@@ -207,6 +219,7 @@ pub fn list(conn: &Connection) -> Result<Value> {
            AND s.id NOT IN (SELECT session_id FROM archived)
          GROUP BY c.worktree, c.rel ORDER BY c.worktree <> '', c.worktree, c.rel",
     )?;
+    let mut arch = conn.prepare("SELECT 1 FROM archived_worktrees WHERE repo_id = ?1 AND worktree = ?2")?;
     let default = crate::db::default_slot(conn)?;
     let mut out = Vec::with_capacity(repos.len());
     for (id, mut v) in repos {
@@ -214,9 +227,21 @@ pub fn list(conn: &Connection) -> Result<Value> {
         if v["slot"].is_null() {
             v["slot"] = json!(default);
         }
-        let groups: Vec<Group> = gst
+        let mut groups: Vec<Group> = gst
             .query_map(params![id], |r| Ok(Group { worktree: r.get(0)?, rel: r.get(1)?, sessions: r.get(2)?, last_ts: r.get(3)? }))?
             .collect::<Result<_, _>>()?;
+        // Un worktree créé par l'app existe avant que ses conversations soient analysées (et
+        // une discussion en direct ne survit pas au redémarrage) : il reste visible et choisissable.
+        if !v["key"].as_str().unwrap_or("").starts_with("dir:") {
+            let root = v["root"].as_str().unwrap_or("").to_string();
+            let porcelain = git(Path::new(&root), &["worktree", "list", "--porcelain"]).unwrap_or_default().join("\n");
+            for name in app_worktrees(&porcelain, &crate::home()) {
+                let archived: bool = arch.query_row(params![id, name], |_| Ok(())).optional()?.is_some();
+                if !archived && !groups.iter().any(|g| g.worktree == name) {
+                    groups.push(Group { worktree: name, rel: String::new(), sessions: 0, last_ts: None });
+                }
+            }
+        }
         v["groups"] = serde_json::to_value(groups)?;
         out.push(v);
     }
@@ -305,4 +330,13 @@ pub fn launch_resume(conn: &Connection, sid: &str) -> Result<LaunchTarget> {
     }
     let config_dir = account_dir(conn, slot.as_deref())?;
     Ok(LaunchTarget { dir: cwd, config_dir, resume: Some(sid.to_string()) })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn app_worktrees_are_listed() {
+        let p = "worktree /r/archc\nHEAD aa\nbranch refs/heads/main\n\nworktree /h/drifty/worktrees/archc/Silencieux-2-decisions\nHEAD bb\n\nworktree /h/claudius/worktrees/archc/old\n\nworktree /h/conductor/workspaces/archc/x\n";
+        assert_eq!(super::app_worktrees(p, std::path::Path::new("/h")), ["Silencieux-2-decisions", "old"]);
+    }
 }

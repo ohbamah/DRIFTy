@@ -7,6 +7,7 @@ import { openMenu } from "./select.js";
 import { newChatDialog } from "./views/chat.js";
 import { editProject } from "./views/project.js";
 import { confirmBox } from "./confirm.js";
+import { rowStatus } from "./status.js";
 import { openJob } from "./run.js";
 
 const PER_GROUP = 5;
@@ -45,8 +46,9 @@ const STATUS = {
   idle: `<span class="st st-idle" title="En attente"></span>`,
   done: `<span class="st st-done" title="Terminée">${icon("check")}</span>`,
   monitor: `<span class="st st-monitor" title="Attend la notification d'une surveillance (Monitor) en cours">${icon("eye")}</span>`,
+  ask: `<span class="st st-ask" title="Claude attend ta réponse (question ou plan)"></span>`,
+  permit: `<span class="st st-permit" title="Claude attend ton autorisation"></span>`,
 };
-const liveStatus = (chat) => (!chat ? "done" : chat.status === "working" ? "working" : chat.unread ? "unread" : chat.status === "exited" ? "done" : "idle");
 
 /** Une tâche de fond en une ligne : sous-agent, commande, ou surveillance (et ce qu'elle surveille). */
 export const bgLine = (t) => `${{ agent: "Sous-agent", shell: "Commande", monitor: "Surveillance" }[t.kind] || "Tâche"} : ${t.label}${t.watches?.length ? ` (surveille : ${t.watches.join(", ")})` : ""}`;
@@ -60,12 +62,11 @@ export function bgBadge(tasks) {
   return `<span class="sb-bg" title="${esc(title)}">${agents ? `${icon("agent")}${agents}` : ""}${shells ? `${icon("terminal")}${shells}` : ""}${monitors ? `${icon("eye")}${monitors}` : ""}</span>`;
 }
 
-/** Statut d'une ligne : Claude au travail (même hors DRIFTy) prime sur l'œil d'une surveillance. */
-function rowStatus(c, chat, sid) {
-  const live = liveStatus(chat);
-  if (live === "working" || store.busy?.has(sid) || store.busy?.has(c.id)) return "working";
-  return (store.bg?.[sid] || store.bg?.[c.id] || []).some((t) => t.kind === "monitor") ? "monitor" : live;
-}
+/** Statut d'une ligne (règle dans `status.js`), d'après la discussion et le transcript. */
+const lineStatus = (c, chat, sid) => {
+  const has = (set) => set?.has(sid) || set?.has(c.id);
+  return rowStatus({ chat, busy: has(store.busy), waiting: has(store.waiting), monitor: (store.bg?.[sid] || store.bg?.[c.id] || []).some((t) => t.kind === "monitor") });
+};
 
 function convRow(c, chat, sel) {
   const on = (chat && chat.id === sel.c) || c.id === sel.s;
@@ -74,7 +75,7 @@ function convRow(c, chat, sel) {
   // Conversation (transcript) et/ou discussion en direct : de quoi la renommer ou l'archiver.
   const sid = c.listed === false ? chat?.session_id || "" : c.id;
   return `<a class="sb-conv${on ? " on" : ""}" href="${href}" title="${esc(c.title || c.first_prompt || "")}" data-sid="${esc(sid)}" data-chat="${esc(chat?.id || "")}">
-    ${STATUS[rowStatus(c, chat, sid)]}<span class="sb-title">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>${bgBadge(store.bg?.[sid] || store.bg?.[c.id])}
+    ${STATUS[lineStatus(c, chat, sid)]}<span class="sb-title">${esc(c.title || c.first_prompt || c.id.slice(0, 8))}</span>${bgBadge(store.bg?.[sid] || store.bg?.[c.id])}
     <span class="sb-meta">${esc(model)} ${age(chat ? Date.now() : c.last_ts)}</span>
     <button class="sb-dots" type="button" data-dots title="Renommer, archiver" aria-label="Actions">${icon("dots")}</button>
   </a>`;
@@ -208,7 +209,7 @@ async function projectHtml(repo, sel) {
         <div class="sb-wt-row">${working ? STATUS.working : `<span class="st st-wt"></span>`}<span class="sb-wt-name">${esc(g.rel && g.worktree ? `${g.worktree}/${g.rel}` : name)}</span>${!g.worktree && !g.rel ? `<span class="sb-tag">primary</span>` : ""}
           ${g.worktree && !g.rel ? `<button class="sb-dots" type="button" data-wt-dots data-repo="${repo.id}" data-wt="${esc(g.worktree)}" data-n="${inGroup.length}" title="Archiver le worktree" aria-label="Actions du worktree">${icon("dots")}</button>` : ""}</div>
         ${branch ? `<div class="sb-branch">${esc(branch)}</div>` : ""}
-        ${rows}${more}
+        ${rows || `<div class="sb-empty sb-wt-empty" title="Ses conversations apparaîtront après « Analyser »">Pas encore analysé</div>`}${more}
       </div>`;
     }).join("");
   }

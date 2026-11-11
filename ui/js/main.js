@@ -1,5 +1,5 @@
 // Disposition : barre latérale persistante + zone principale routée.
-import { api, esc, icon, hideTip, toast, loader, lightbox, $, $$ } from "./lib.js";
+import { api, esc, icon, hideTip, toast, loader, lightbox, copyText, $, $$ } from "./lib.js";
 import * as usage from "./views/usage.js";
 import * as conversations from "./views/conversations.js";
 import * as ledger from "./views/ledger.js";
@@ -36,6 +36,13 @@ async function route() {
   }
 }
 addEventListener("hashchange", route);
+// Bouton « Copier » d'un bloc de code (rendu Markdown, voir md.js) : où qu'il soit.
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-code-copy]");
+  if (!b) return;
+  const text = b.closest(".code-block")?.querySelector("pre")?.textContent || "";
+  (await copyText(text)) ? toast("Code copié.") : toast("Copie impossible.", true);
+});
 // Clic sur une vignette d'image jointe : plein écran.
 document.addEventListener("click", (e) => {
   const t = e.target.closest(".thumb[data-full]");

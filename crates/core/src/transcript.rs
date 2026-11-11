@@ -7,7 +7,9 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
 
-const MAX_TEXT: usize = 6_000;
+/// Garde-fou contre un message démesuré (un collage de plusieurs Mo), pas une coupe de lecture :
+/// à 6 000, une réponse longue s'affichait tronquée (« … ») et son transfert ou sa copie aussi.
+const MAX_TEXT: usize = 200_000;
 
 #[derive(Serialize, Default)]
 pub struct Entry {
@@ -176,4 +178,14 @@ pub fn decode_image(source_json: &str) -> Result<(String, Vec<u8>)> {
     }
     let data = v["data"].as_str().ok_or_else(|| anyhow::anyhow!("The image cannot be shown because it is not embedded data."))?;
     Ok((media, base64::engine::general_purpose::STANDARD.decode(data)?))
+}
+
+#[cfg(test)]
+mod clip_tests {
+    #[test]
+    fn a_long_reply_is_not_cut() {
+        let reply = "é".repeat(17_889);
+        assert_eq!(super::clip(&reply), reply);
+        assert!(super::clip(&"x".repeat(super::MAX_TEXT + 1)).ends_with("\n…"));
+    }
 }

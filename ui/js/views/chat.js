@@ -9,6 +9,8 @@ import { toBottom, jumpButton } from "../jump.js";
 import { replyActions, bindReplies } from "../reply.js";
 import { confirmBox } from "../confirm.js";
 import { mountAsk, askResolved } from "../ask.js";
+import { mountPlan, planChoices, planOutcome } from "../plan.js";
+import { bashRow, appendTail, asksPassword } from "../bashrow.js";
 
 let source = null; // flux SSE du chat affiché (un seul à la fois)
 
@@ -116,13 +118,6 @@ export function newChatDialog(repo, onStarted) {
 
 // ------------------------------------------------------------ composeur
 // `draftKey` : le texte non envoyé est gardé (par discussion) et retrouvé au retour.
-/** Une commande `!` et sa sortie (en cours : sans sortie, avec une roue). */
-function bashRow(ev, running = false) {
-  const meta = running ? "en cours" : `${ev.code === 0 ? "" : `code ${ev.code ?? "?"} · `}${ev.ms < 1000 ? `${ev.ms} ms` : `${(ev.ms / 1000).toFixed(1)} s`}`;
-  const title = running ? "" : "Jointe au prochain message envoyé à Claude";
-  return `<div class="bash-run${running ? " running" : ""}" title="${title}"><div class="bash-cmd"><b>!</b><span>${esc(ev.command)}</span><span class="bash-meta">${esc(meta)}</span></div>${ev.stdout ? `<pre>${esc(ev.stdout)}</pre>` : ""}${ev.stderr ? `<pre class="err">${esc(ev.stderr)}</pre>` : ""}</div>`;
-}
-
 export function composer(placeholder, onSend, { draftKey = "", onStop = null, onRecall = null, improve = null, schedule = null, prompts = null, slash = null, btw = null, bash = null } = {}) {
   const el = document.createElement("div");
   el.className = "composer";
@@ -500,12 +495,27 @@ export async function renderLive(box, chatId, onMeta) {
       comp.fill(r.text);
     } catch (e) { toast(e.message, true); }
   };
-  const comp = composer("Écris à Claude… (! pour une commande shell)", (t, images) => api(`/api/chats/${chatId}/send`, { method: "POST", json: { text: t, images } }), {
+  // Discussion arrêtée (processus fini, reprise refusée…) : écrire la reprend dans une nouvelle
+  // discussion sur la même conversation, au lieu d'une saisie morte.
+  let curStatus = info.status;
+  const resumeStopped = async (body) => {
+    const i = await api(`/api/chats/${chatId}`);
+    const sid = i.session_id || i.resume_of;
+    if (!sid) throw new Error("La discussion ne peut pas être reprise : elle s'est arrêtée avant d'avoir une conversation.");
+    const c = await api("/api/chats", { method: "POST", json: { session_id: sid, bypass: i.bypass, model: i.model || null, title: i.name || null, ...body } });
+    await api(`/api/chats/${chatId}`, { method: "DELETE" }).catch(() => {});
+    location.hash = `#/conversations?c=${c.id}`;
+    return c;
+  };
+  const comp = composer("Écris à Claude… (! pour une commande shell)", (t, images) => curStatus === "exited"
+    ? resumeStopped({ text: t, images })
+    : api(`/api/chats/${chatId}/send`, { method: "POST", json: { text: t, images } }), {
     draftKey: chatId,
-    // `!commande` : tourne dans le dossier de la discussion ; sa sortie part avec le prochain message.
+    // `!commande` : tourne dans le dossier de la discussion, sortie au fil de l'eau ; elle part
+    // avec le prochain message.
     bash: async (cmd) => {
-      const row = add(bashRow({ command: cmd }, true));
-      try { await api(`/api/chats/${chatId}/bash`, { method: "POST", json: { text: cmd } }); } finally { row.remove(); }
+      const target = curStatus === "exited" ? (await resumeStopped({})).id : chatId;
+      await api(`/api/chats/${target}/bash`, { method: "POST", json: { text: cmd } });
     },
     improve: () => ({ chat_id: chatId }),
     prompts: { repoId: () => info.repo_id },
@@ -670,9 +680,8 @@ export async function renderLive(box, chatId, onMeta) {
     if (s !== "working") clearInterval(turn.timer);
     working.hidden = s !== "working";
     stopBtn.disabled = s !== "working";
-    const off = s === "exited";
-    $("textarea", comp).disabled = off;
-    $("[data-send]", comp).disabled = off;
+    curStatus = s;
+    $("textarea", comp).placeholder = s === "exited" ? "Discussion arrêtée : écris pour la reprendre (! pour une commande shell)" : "Écris à Claude… (! pour une commande shell)";
     onMeta?.({ status: s, cost });
   };
   setStatus(info.status);
@@ -680,7 +689,53 @@ export async function renderLive(box, chatId, onMeta) {
   onMeta?.({ tokens: info.tokens_total, cost: info.cost_usd });
 
   let lastReported = 0; // dernier coût cumulé reçu (voir « result »)
+  // Texte en cours d'écriture : rendu PAR LOTS, jamais à chaque fragment (refaire le Markdown de
+  // toute la réponse à chaque fragment est quadratique : une longue réponse figeait la page et
+  // lui faisait prendre des Go). L'intervalle suit le coût du dernier rendu (≤ ~20 % du temps) ;
+  // fenêtre cachée : rien n'est rendu, la réponse finale remplace ce texte de toute façon.
+  let liveTimer = 0, liveCost = 0;
+  const drawLiveText = () => {
+    liveTimer = 0;
+    if (!live || document.hidden) return;
+    const t0 = performance.now(), stick = nearBottom();
+    live.innerHTML = md(live._text);
+    liveCost = performance.now() - t0;
+    if (stick) scroller.scrollTop = scroller.scrollHeight;
+  };
+  const scheduleLive = () => { if (!liveTimer && !document.hidden) liveTimer = setTimeout(drawLiveText, Math.max(50, liveCost * 5)); };
   const asks = new Map(); // questions de Claude (AskUserQuestion) par demande, pour leur récapitulatif
+  const bashEl = (id) => id && thread.querySelector(`[data-bash="${CSS.escape(id)}"]`);
+  // Rendu d'un lot de sortie d'une commande `!` (voir « bash_chunk »).
+  const flushBash = (pre) => {
+    pre._timer = 0;
+    if (!pre.isConnected || !pre._pending) return;
+    const stick = nearBottom(), end = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
+    pre.hidden = false;
+    pre.textContent = appendTail(pre.textContent, pre._pending);
+    pre._pending = "";
+    // Mot de passe demandé (sudo…) : le champ d'entrée se masque et prend la main.
+    const inp = pre.closest("[data-bash]")?.querySelector(".bash-in input");
+    if (inp && inp.type !== "password" && asksPassword(pre.textContent)) { inp.type = "password"; inp.placeholder = "Mot de passe : envoyé à la commande seulement, jamais gardé"; inp.focus(); }
+    if (end) pre.scrollTop = pre.scrollHeight;
+    if (stick) scroller.scrollTop = scroller.scrollHeight;
+  };
+  // Entrée d'une commande `!` en cours (réponse, mot de passe) : envoyée, puis le champ se vide.
+  thread.addEventListener("submit", (e) => {
+    const f = e.target.closest(".bash-in");
+    if (!f) return;
+    e.preventDefault();
+    const inp = f.querySelector("input"), line = inp.value;
+    inp.value = "";
+    api(`/api/chats/${chatId}/bash/${encodeURIComponent(f.closest("[data-bash]").dataset.bash)}/input`, { method: "POST", json: { text: line } }).catch((err) => toast(err.message, true));
+    if (inp.type === "password") { inp.type = "text"; inp.placeholder = "Entrée pour la commande (Entrée pour envoyer)"; }
+  });
+  // « Arrêter » d'une commande `!` en cours.
+  thread.addEventListener("click", (e) => {
+    const b = e.target.closest(".bash-stop");
+    if (!b) return;
+    b.disabled = true;
+    api(`/api/chats/${chatId}/bash/${encodeURIComponent(b.closest("[data-bash]").dataset.bash)}/stop`, { method: "POST" }).catch((err) => { toast(err.message, true); b.disabled = false; });
+  });
   const handle = (ev, at) => {
     const t = ev.type;
     if (t === "drifty") {
@@ -711,14 +766,25 @@ export async function renderLive(box, chatId, onMeta) {
         queued.get(ev.id)?.remove();
         queued.delete(ev.id);
       }
-      else if (ev.kind === "bash") add(bashRow(ev));
+      else if (ev.kind === "bash_start") { if (!bashEl(ev.id)) add(bashRow(ev, true)); }
+      else if (ev.kind === "bash_chunk") {
+        const pre = bashEl(ev.id)?.querySelector(ev.stream === "out" ? "pre.out" : "pre.err");
+        if (pre) {
+          // Par lots (une sortie rapide arrive en milliers de morceaux) : ajout au tampon, rendu
+          // au plus tous les 100 ms.
+          pre._pending = (pre._pending || "") + ev.text;
+          if (!pre._timer) pre._timer = setTimeout(() => flushBash(pre), 100);
+        }
+      }
+      else if (ev.kind === "bash") { const el = bashEl(ev.id); if (el) el.outerHTML = bashRow(ev); else add(bashRow(ev)); }
       else if (ev.kind === "status") setStatus(ev.status);
       else if (ev.kind === "notice") add(`<div class="event notice">${esc(ev.text)}</div>`);
       else if (ev.kind === "permission_resolved") {
         const card = thread.querySelector(`[data-perm="${CSS.escape(ev.request_id)}"]`);
-        if (card?.classList.contains("ask")) { card.classList.add(ev.allow ? "ok" : "no"); card.removeAttribute("tabindex"); card.innerHTML = askResolved(asks.get(ev.request_id), ev); }
+        if (card?.classList.contains("plan")) { card.classList.add(ev.allow ? "ok" : "no"); card.removeAttribute("tabindex"); card.querySelector(".plan-actions").outerHTML = `<div class="plan-done">${esc(planOutcome(ev, planChoices(info.bypass)))}</div>`; }
+        else if (card?.classList.contains("ask")) { card.classList.add(ev.allow ? "ok" : "no"); card.removeAttribute("tabindex"); card.innerHTML = askResolved(asks.get(ev.request_id), ev); }
         else if (card) { card.classList.add(ev.allow ? "ok" : "no"); card.querySelector(".perm-actions").innerHTML = `<span class="small">${ev.allow ? "Autorisé" : "Refusé"}</span>`; }
-      } else if (ev.kind === "exit") add(`<div class="event">Session terminée${ev.code ? ` (code ${ev.code})` : ""}</div>`);
+      } else if (ev.kind === "exit") add(`<div class="event">Session terminée${ev.code ? ` (code ${ev.code})` : ""} : écris pour la reprendre</div>`);
       else if (ev.kind === "stderr" && /error|erreur/i.test(ev.text)) add(`<div class="event err">${esc(ev.text)}</div>`);
       return;
     }
@@ -729,8 +795,7 @@ export async function renderLive(box, chatId, onMeta) {
       if (e.type === "content_block_delta" && e.delta?.type === "text_delta") {
         if (!live) { live = addReply(`<div class="msg-ai streaming"></div>`); live._text = ""; }
         live._text += e.delta.text;
-        live.innerHTML = md(live._text);
-        if (nearBottom()) scroller.scrollTop = scroller.scrollHeight;
+        scheduleLive();
       }
       return;
     }
@@ -752,6 +817,16 @@ export async function renderLive(box, chatId, onMeta) {
       for (const b of ev.message?.content || []) {
         if (b.type === "tool_result") tools.get(b.tool_use_id)?.classList.add(b.is_error ? "fail" : "done");
       }
+      return;
+    }
+    if (t === "control_request" && ev.request?.subtype === "can_use_tool" && ev.request.tool_name === "ExitPlanMode") {
+      const decide = (body) => api(`/api/chats/${chatId}/permission`, { method: "POST", json: { request_id: ev.request_id, ...body } }).catch((e) => { toast(e.message, true); throw e; });
+      const card = addReply(`<div class="perm plan" data-perm="${esc(ev.request_id)}"></div>`);
+      mountPlan(card, ev.request, {
+        choices: planChoices(info.bypass),
+        approve: (mode) => decide({ allow: true, mode }),
+        keep: (message) => decide({ allow: false, message }),
+      });
       return;
     }
     if (t === "control_request" && ev.request?.subtype === "can_use_tool" && ev.request.tool_name === "AskUserQuestion") {

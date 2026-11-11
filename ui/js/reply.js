@@ -19,6 +19,13 @@ export function bindReplies(container, rawOf, ctx) {
   // « plus anciens »), et chaque liaison en ajoutait un, d'où une modale ouverte N fois.
   if (container._replies) container.removeEventListener("click", container._replies);
   container._replies = async (e) => {
+    // Bloc de code d'une réponse : transféré seul (sa copie est gérée partout, voir main.js).
+    const code = e.target.closest("[data-code-transfer]");
+    if (code) {
+      const text = code.closest(".code-block")?.querySelector("pre")?.textContent || "";
+      if (text.trim() && !document.querySelector("dialog.tf-dlg")) transferDialog(text, await ctx());
+      return;
+    }
     const btn = e.target.closest(".reply-actions button");
     if (!btn) return;
     const reply = btn.closest(".reply");

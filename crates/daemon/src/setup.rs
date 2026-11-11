@@ -18,7 +18,12 @@ installer les dépendances (bundle install, npm ci, uv sync…), préparer ce qu
 d'interactif, rien d'écrit hors du worktree. Le script est exécuté par `bash -e` dans le worktree ; protège les copies \
 facultatives (`[ -f \"$DRIFTY_ROOT_PATH/.env\" ] && cp …`). Variables : $DRIFTY_ROOT_PATH (dossier principal), \
 $DRIFTY_WORKSPACE_NAME (nom du worktree), $PORT (port du worktree). Si un conductor.json existe, reprends son script \
-setup. Script court, commenté, sans rien d'inutile ; vide si rien n'est nécessaire. Réponds UNIQUEMENT par un objet JSON : \
+setup. Sous-modules git (listés dans le résumé) : un worktree neuf a leurs dossiers VIDES ; s'ils sont \
+déclarés dans .gitmodules, `git submodule update --init --recursive` ; un gitlink SANS .gitmodules ne se met pas à jour \
+par git submodule : clone-le depuis le dossier principal puis place-le sur le commit attendu \
+(`git clone -q \"$DRIFTY_ROOT_PATH/<chemin>\" <chemin> && git -C <chemin> checkout -q \"$(git rev-parse HEAD:<chemin>)\"`). \
+Si on te donne le script ACTUEL, pars de lui : garde ce qui marche, et ses commentaires sont des consignes de \
+l'utilisateur, à appliquer et à garder dans le script. Script court, commenté, sans rien d'inutile ; vide si rien n'est nécessaire. Réponds UNIQUEMENT par un objet JSON : \
 {\"script\": \"...\", \"why\": \"une phrase\"}.";
 
 /// Réglage du projet : `{script, configured}`, plus la dernière proposition de l'IA.
@@ -43,10 +48,45 @@ fn summary(root: &str) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).lines().take(80).collect::<Vec<_>>().join("\n"))
         .unwrap_or_default();
     s += &format!("Fichiers ignorés par git présents dans le dossier principal :\n{ignored}\n");
+    s += &submodules(root);
     if let Ok(c) = std::fs::read_to_string(std::path::Path::new(root).join("conductor.json")) {
         s += &format!("conductor.json :\n{}\n", c.chars().take(3000).collect::<String>());
     }
     s
+}
+
+/// Sous-modules (gitlinks) du dépôt, avec leur déclaration dans .gitmodules s'il y en a une :
+/// un worktree neuf les a vides, et un gitlink non déclaré échappe à `git submodule`.
+fn submodules(root: &str) -> String {
+    let links = std::process::Command::new("git")
+        .args(["-C", root, "ls-files", "--stage"])
+        .output()
+        .map(|o| gitlinks(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    if links.is_empty() {
+        return String::new();
+    }
+    let declared = std::fs::read_to_string(std::path::Path::new(root).join(".gitmodules")).unwrap_or_default();
+    let mut s = String::from("Sous-modules git (gitlinks) :\n");
+    for l in links {
+        let how = if declared.contains(&format!("path = {l}")) { "déclaré dans .gitmodules" } else { "SANS entrée dans .gitmodules" };
+        s += &format!("- {l} ({how})\n");
+    }
+    s
+}
+
+/// Chemins des gitlinks dans la sortie de `git ls-files --stage` (mode 160000).
+fn gitlinks(stage: &str) -> Vec<String> {
+    stage.lines().filter(|l| l.starts_with("160000 ")).filter_map(|l| l.split_once('\t')).map(|(_, p)| p.to_string()).collect()
+}
+
+/// Message envoyé à l'IA : le dépôt, et le script actuel du champ s'il n'est pas vide.
+fn request(summary: &str, current: &str) -> String {
+    let current = current.trim();
+    if current.is_empty() {
+        return summary.to_string();
+    }
+    format!("{summary}\nScript ACTUEL (à reprendre ; ses commentaires sont des consignes de l'utilisateur) :\n```bash\n{current}\n```\n")
 }
 
 fn parse(text: &str) -> Result<Value> {
@@ -93,11 +133,13 @@ pub async fn route_set(State(app): State<App>, Path(id): Path<i64>, Json(v): Jso
 }
 
 /// Proposition de l'IA ; gardée comme proposition (sans écraser un script enregistré).
-pub async fn route_analyze(State(app): State<App>, Path(id): Path<i64>) -> ApiResult {
+/// Corps : `{current}`, le contenu du champ (enregistré ou non) d'où l'IA repart.
+pub async fn route_analyze(State(app): State<App>, Path(id): Path<i64>, Json(body): Json<Value>) -> ApiResult {
+    let current = body["current"].as_str().unwrap_or("").to_string();
     let v = with_conn(&app, move |c| {
         let (root, slot): (String, Option<String>) = c.query_row("SELECT root, slot FROM repos WHERE id = ?1", rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let slot = slot.or(db::default_slot(c)?);
-        Ok(json!([summary(&root), repos::account_dir(c, slot.as_deref())?]))
+        Ok(json!([request(&summary(&root), &current), repos::account_dir(c, slot.as_deref())?]))
     })
     .await?
     .0;
@@ -124,5 +166,18 @@ mod tests {
         let v = super::parse("Voici :\n{\"script\": \"cp -n a b\\n\", \"why\": \"copie\"}").unwrap();
         assert_eq!(v["script"], "cp -n a b");
         assert!(super::parse("rien").is_err());
+    }
+
+    #[test]
+    fn gitlinks_are_found() {
+        let stage = "100644 aa 0\tMakefile\n160000 1baab50 0\thopt\n160000 cc 0\tvendor/x y\n";
+        assert_eq!(super::gitlinks(stage), ["hopt", "vendor/x y"]);
+    }
+
+    #[test]
+    fn current_script_reaches_the_request() {
+        assert_eq!(super::request("dépôt", "  \n"), "dépôt");
+        let r = super::request("dépôt", "# Il faut utiliser le gitmodule hopt\nmake dev\n");
+        assert!(r.contains("# Il faut utiliser le gitmodule hopt\nmake dev") && r.contains("consignes"));
     }
 }

@@ -119,9 +119,9 @@ function watchChats() {
         fire("done", "Agent terminé", c.name, c.repo_id, `#/conversations?c=${c.id}`);
       }
       if ((c.pending || 0) > (p.pending || 0)) {
-        // Une question de Claude (AskUserQuestion) passe par le même canal qu'une autorisation.
-        const asked = (c.questions || 0) > (p.questions || 0);
-        fire("permission", asked ? "Claude te pose une question" : "Autorisation demandée", c.name, c.repo_id, `#/conversations?c=${c.id}`);
+        // Question, plan et autorisation passent par le même canal ; le titre dit lequel.
+        const title = { question: "Claude te pose une question", plan: "Claude attend la validation de son plan" }[c.waiting_for] || "Autorisation demandée";
+        fire("permission", title, c.name, c.repo_id, `#/conversations?c=${c.id}`);
       }
     }
   }

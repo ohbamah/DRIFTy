@@ -69,7 +69,7 @@ export function editProject(repo, hint = "") {
     setupBtn.disabled = true;
     setupBtn.innerHTML = `<span class="spin" style="width:12px;height:12px;border-width:2px"></span> Analyse du dépôt…`;
     try {
-      const r = await api(`/api/repos/${repo.id}/setup/analyze`, { method: "POST" });
+      const r = await api(`/api/repos/${repo.id}/setup/analyze`, { method: "POST", json: { current: setupTa.value } });
       setupTa.value = r.script;
       if (r.why) $("#setup-why", dlg).textContent = r.why;
     } catch (err) { toast(err.message, true); }

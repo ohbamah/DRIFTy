@@ -137,6 +137,9 @@ fn build_window(app: &tauri::AppHandle, origin: Url) -> tauri::Result<WebviewWin
         // Feux centrés sur la marque de la barre latérale (cf. ui/css/app.css, `.is-app`).
         .traffic_light_position(tauri::LogicalPosition::new(18.0, 21.0))
         .initialization_script(APP_JS)
+        // Sans ça, Tauri capte les fichiers déposés sur la fenêtre et la page ne reçoit jamais
+        // `drop` : une image glissée dans la saisie n'était pas jointe.
+        .disable_drag_drop_handler()
         // Une page hors du démon ne s'ouvre jamais dans la webview.
         .on_navigation(move |url| {
             if is_internal(url, &nav_origin) {

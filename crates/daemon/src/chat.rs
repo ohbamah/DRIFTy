@@ -119,6 +119,8 @@ pub struct Chat {
     limits: Arc<Mutex<Limits>>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     child: tokio::sync::Mutex<Option<Child>>,
+    /// Commandes `!` en cours : de quoi les arrêter.
+    bash_runs: Mutex<HashMap<String, BashRun>>,
 }
 
 /// Limites de la jauge de conversation, appliquées à CHAQUE discussion : `/compact` quand
@@ -165,17 +167,44 @@ impl Default for Hub {
     }
 }
 
-/// Délai et taille maximale (par flux, la fin est gardée) d'une commande `!`.
-const BASH_TIMEOUT_S: u64 = 120;
-const BASH_MAX_CHARS: usize = 30_000;
+/// Commande `!` en cours : de quoi l'arrêter et lui écrire.
+struct BashRun {
+    stop: tokio::sync::oneshot::Sender<()>,
+    input: tokio::sync::mpsc::Sender<String>,
+}
 
-/// Les `n` derniers caractères de `s` (précédés de « … » s'il a fallu couper).
-fn tail_chars(s: &str, n: usize) -> String {
-    let count = s.chars().count();
-    if count <= n {
-        return s.to_string();
+/// Délai d'une commande `!` (un bouton l'arrête avant).
+const BASH_TIMEOUT_S: u64 = 600;
+
+/// Ce qui a mis la discussion en attente de l'utilisateur, d'après la demande la plus récente :
+/// une question (`AskUserQuestion`), un plan à valider (`ExitPlanMode`) ou une autorisation.
+pub fn waiting_kind(tool_name: &str) -> &'static str {
+    match tool_name {
+        "AskUserQuestion" => "question",
+        "ExitPlanMode" => "plan",
+        _ => "permission",
     }
-    format!("…{}", s.chars().skip(count - n).collect::<String>())
+}
+
+/// Réponse à une demande `can_use_tool`. `answers` (questions) s'ajoute à l'entrée de l'outil,
+/// comme le fait le terminal ; `mode` (plan approuvé) fixe le mode d'autorisation de la suite
+/// (sans lui, Claude reprend celui d'avant le plan ; mesuré le 2026-11-10) ; `message` est le
+/// motif d'un refus, lu par Claude.
+pub fn permission_response(input: &Value, allow: bool, answers: Option<&Value>, mode: Option<&str>, message: Option<&str>) -> Result<Value> {
+    if !allow {
+        return Ok(json!({"behavior": "deny", "message": message.unwrap_or("Refusé depuis DRIFTy.")}));
+    }
+    let mut input = input.clone();
+    if let (Some(a), Some(obj)) = (answers, input.as_object_mut()) {
+        obj.insert("answers".into(), a.clone());
+    }
+    let mut r = json!({"behavior": "allow", "updatedInput": input});
+    match mode {
+        None => {}
+        Some(m @ ("acceptEdits" | "default")) => r["updatedPermissions"] = json!([{"type": "setMode", "mode": m, "destination": "session"}]),
+        Some(m) => anyhow::bail!("The permission cannot be granted because the mode `{m}` is not one DRIFTy offers after a plan."),
+    }
+    Ok(r)
 }
 
 /// Résultat sans aucun tour de Claude (commande locale, reprise) : 0 tour, ou 0 s et 0 token écrit.
@@ -217,6 +246,16 @@ impl Chat {
         }
     }
 
+    /// Événement de passage (sortie d'une commande `!` au fil de l'eau) : diffusé, jamais gardé.
+    fn emit_live(&self, ev: Value) {
+        let msg = {
+            let mut st = self.state.lock().unwrap();
+            st.seq += 1;
+            json!({"seq": st.seq, "at": now_ms(), "ev": ev})
+        };
+        let _ = self.tx.send(msg);
+    }
+
     fn set_status(&self, s: &'static str) {
         {
             let mut st = self.state.lock().unwrap();
@@ -235,7 +274,8 @@ impl Chat {
             "id": self.id, "repo_id": self.repo_id, "name": *self.title.lock().unwrap(), "cwd": self.cwd, "slot": self.slot,
             "bypass": self.bypass, "worktree": self.worktree, "created": self.created, "resume_of": self.resume_of, "setup_job": self.setup_job,
             "session_id": st.session_id, "status": st.status, "pending": st.pending.len(),
-            "questions": st.pending.values().filter(|r| r["tool_name"] == "AskUserQuestion").count(), "cost_usd": st.cost_usd, "tokens_total": st.tokens, "model": st.model,
+            // Ce qu'attend la discussion (la demande la plus récente) : question, plan ou autorisation.
+            "waiting_for": st.pending.values().max_by_key(|r| r["_at"].as_i64().unwrap_or(0)).map(|r| waiting_kind(r["tool_name"].as_str().unwrap_or(""))), "cost_usd": st.cost_usd, "tokens_total": st.tokens, "model": st.model,
             "unread": unread(st.status, st.finished_at, st.seen_at),
             "queue": st.queue.iter().map(|(id, text, _)| json!({"id": id, "text": text})).collect::<Vec<_>>(),
         })
@@ -312,32 +352,50 @@ impl Chat {
         Ok(())
     }
 
-    /// Commande `!` (mode bash du terminal) : lancée dans le dossier de la discussion par le
-    /// shell de l'utilisateur, sa sortie s'affiche dans le fil et part avec le prochain message.
-    pub async fn bash(&self, command: &str) -> Result<()> {
-        let command = command.trim();
+    /// Commande `!` (mode bash du terminal) : lancée tout de suite, sa sortie arrive au fil de
+    /// l'eau (`bash_chunk`, non gardés : le rejeu a la sortie finale) et part avec le prochain
+    /// message. Rend l'identifiant de la commande (pour l'arrêter).
+    pub fn bash(self: &Arc<Self>, command: &str) -> Result<String> {
+        let command = command.trim().to_string();
         if command.is_empty() {
             anyhow::bail!("The command cannot run because it is empty.");
         }
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let id = new_id();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(8);
+        self.bash_runs.lock().unwrap().insert(id.clone(), BashRun { stop: stop_tx, input: input_tx });
         let started = now_ms();
-        let run = Command::new(&shell)
-            .args(["-lc", command])
-            .current_dir(&self.cwd)
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output();
-        let (stdout, stderr, code) = match tokio::time::timeout(std::time::Duration::from_secs(BASH_TIMEOUT_S), run).await {
-            Ok(Ok(o)) => (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned(), o.status.code()),
-            Ok(Err(e)) => (String::new(), format!("{shell}: {e}"), None),
-            Err(_) => (String::new(), format!("Command stopped after {BASH_TIMEOUT_S} s."), None),
-        };
-        let (stdout, stderr) = (tail_chars(stdout.trim_end(), BASH_MAX_CHARS), tail_chars(stderr.trim_end(), BASH_MAX_CHARS));
-        self.state.lock().unwrap().bash_context.push(format!(
-            "<bash-input>{command}</bash-input>\n<bash-stdout>{stdout}</bash-stdout><bash-stderr>{stderr}</bash-stderr>"
-        ));
-        self.emit(json!({"type": "drifty", "kind": "bash", "command": command, "stdout": stdout, "stderr": stderr, "code": code, "ms": now_ms() - started}));
+        self.emit(json!({"type": "drifty", "kind": "bash_start", "id": id, "command": command, "ts": started}));
+        let (chat, bid) = (self.clone(), id.clone());
+        tokio::spawn(async move {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            let timeout = std::time::Duration::from_secs(BASH_TIMEOUT_S);
+            let o = crate::bang::run(&shell, &command, &chat.cwd, timeout, stop_rx, input_rx, |stream, text| {
+                let stream = if stream == crate::bang::Stream::Out { "out" } else { "err" };
+                chat.emit_live(json!({"type": "drifty", "kind": "bash_chunk", "id": bid, "stream": stream, "text": text}));
+            })
+            .await;
+            chat.bash_runs.lock().unwrap().remove(&bid);
+            chat.state.lock().unwrap().bash_context.push(crate::bang::context_block(&command, &o, timeout));
+            chat.emit(json!({"type": "drifty", "kind": "bash", "id": bid, "command": command, "stdout": o.stdout, "stderr": o.stderr,
+                "code": o.code, "stopped": o.stopped, "timed_out": o.timed_out, "ms": now_ms() - started}));
+        });
+        Ok(id)
+    }
+
+    /// Arrête une commande `!` en cours (sa sortie jusque-là est gardée).
+    pub fn bash_stop(&self, bid: &str) -> Result<()> {
+        let run = self.bash_runs.lock().unwrap().remove(bid).ok_or_else(|| anyhow::anyhow!("The command `{bid}` cannot be stopped because it is no longer running."))?;
+        let _ = run.stop.send(());
         Ok(())
+    }
+
+    /// Une ligne tapée pour une commande `!` en cours (réponse, mot de passe) : écrite sur son
+    /// entrée standard, jamais gardée ni diffusée.
+    pub async fn bash_input(&self, bid: &str, line: &str) -> Result<()> {
+        let tx = self.bash_runs.lock().unwrap().get(bid).map(|r| r.input.clone())
+            .ok_or_else(|| anyhow::anyhow!("The input cannot reach the command `{bid}` because it is no longer running."))?;
+        tx.send(line.to_string()).await.map_err(|_| anyhow::anyhow!("The input cannot reach the command `{bid}` because it has ended."))
     }
 
     /// L'utilisateur a regardé la discussion : ce qui est fini est lu.
@@ -403,26 +461,19 @@ impl Chat {
     /// Réponse à une demande : autorisation, ou réponses à des questions (`AskUserQuestion` :
     /// `answers` = question → choix, ajoutées à l'entrée de l'outil comme le fait le terminal).
     /// `message` : motif d'un refus (« en discuter », « annulé »).
-    pub async fn decide(&self, request_id: &str, allow: bool, answers: Option<Value>, message: Option<String>) -> Result<()> {
-        let req = self
-            .state
+    pub async fn decide(&self, request_id: &str, allow: bool, answers: Option<Value>, mode: Option<String>, message: Option<String>) -> Result<()> {
+        // Réponse construite AVANT de retirer la demande : un mode refusé la laisse en attente.
+        let input = self.state.lock().unwrap().pending.get(request_id).map(|r| r["input"].clone());
+        let response = permission_response(&input.unwrap_or(Value::Null), allow, answers.as_ref(), mode.as_deref(), message.as_deref())?;
+        self.state
             .lock()
             .unwrap()
             .pending
             .remove(request_id)
             .ok_or_else(|| anyhow::anyhow!("The permission `{request_id}` cannot be answered because it is no longer pending."))?;
-        let response = if allow {
-            let mut input = req["input"].clone();
-            if let (Some(a), Some(obj)) = (&answers, input.as_object_mut()) {
-                obj.insert("answers".into(), a.clone());
-            }
-            json!({"behavior": "allow", "updatedInput": input})
-        } else {
-            json!({"behavior": "deny", "message": message.clone().unwrap_or_else(|| "Refusé depuis DRIFTy.".into())})
-        };
         self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}}))
             .await?;
-        self.emit(json!({"type": "drifty", "kind": "permission_resolved", "request_id": request_id, "allow": allow, "answers": answers, "message": message}));
+        self.emit(json!({"type": "drifty", "kind": "permission_resolved", "request_id": request_id, "allow": allow, "answers": answers, "mode": mode, "message": message}));
         Ok(())
     }
 
@@ -474,6 +525,10 @@ impl Chat {
     }
 
     pub async fn kill(&self) {
+        // Ses commandes `!` ne lui survivent pas.
+        for (_, run) in self.bash_runs.lock().unwrap().drain() {
+            let _ = run.stop.send(());
+        }
         if let Some(mut c) = self.child.lock().await.take() {
             let _ = c.kill().await;
         }
@@ -553,6 +608,7 @@ impl Hub {
             setup_job: spec.setup_job.clone(),
             title: Mutex::new(spec.name.clone()),
             waiters: Mutex::new(HashMap::new()),
+            bash_runs: Mutex::new(HashMap::new()),
             state: Mutex::new(State {
                 events: Vec::new(),
                 seq: 0,
@@ -616,7 +672,9 @@ impl Hub {
                         }
                         Some("control_request") if ev["request"]["subtype"] == "can_use_tool" => {
                             if let Some(rid) = ev["request_id"].as_str() {
-                                chat.state.lock().unwrap().pending.insert(rid.to_string(), ev["request"].clone());
+                                let mut req = ev["request"].clone();
+                                req["_at"] = json!(now_ms()); // ordre d'arrivée (voir `waiting_for`)
+                                chat.state.lock().unwrap().pending.insert(rid.to_string(), req);
                             }
                         }
                         Some("rate_limit_event") => {
@@ -795,14 +853,42 @@ pub fn worktree_paths(repo_name: &str, name: &str) -> [std::path::PathBuf; 2] {
     [worktree_path(repo_name, name), drifty_core::home().join("claudius").join("worktrees").join(repo_name).join(name)]
 }
 
+/// Nom de worktree (et de branche) tiré de ce que l'utilisateur a tapé : lettres accentuées
+/// ramenées à leur base (« décisions » → « decisions »), tout autre signe hors `-_.` remplacé
+/// par `-` (sans doublon, ni le `..` qu'une branche git refuse), sans `-`/`.` aux bouts,
+/// 60 caractères au plus.
+pub fn worktree_slug(name: &str) -> String {
+    const FROM: &str = "àáâãäåāçćčèéêëēęěìíîïīñńňòóôõöøōùúûüūůýÿžźżšśřłđÀÁÂÃÄÅĀÇĆČÈÉÊËĒĘĚÌÍÎÏĪÑŃŇÒÓÔÕÖØŌÙÚÛÜŪŮÝŸŽŹŻŠŚŘŁĐ";
+    const TO: &str = "aaaaaaaccceeeeeeeiiiiinnnooooooouuuuuuyyzzzssrldAAAAAAACCCEEEEEEEIIIIINNNOOOOOOOUUUUUUYYZZZSSRLD";
+    let mut out = String::new();
+    for c in name.trim().chars() {
+        let c = FROM.chars().position(|f| f == c).and_then(|i| TO.chars().nth(i)).unwrap_or(c);
+        let pair = match c {
+            'œ' => "oe", 'Œ' => "OE", 'æ' => "ae", 'Æ' => "AE", 'ß' => "ss",
+            _ => "",
+        };
+        if !pair.is_empty() {
+            out.push_str(pair);
+        } else if c.is_ascii_alphanumeric() || c == '_' || (c == '.' && !out.ends_with('.')) {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_start_matches(['-', '.']);
+    out.chars().take(60).collect::<String>().trim_end_matches(['-', '.']).to_string()
+}
+
 /// Crée un worktree isolé `<racine>/<nom>` sur une nouvelle branche `<nom>`.
 pub fn create_worktree(repo_root: &str, repo_name: &str, name: &str) -> Result<String> {
+    let typed = name;
+    let name = &worktree_slug(typed);
     let ok = !name.is_empty()
         && name.len() <= 60
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !name.starts_with(['-', '.']);
     if !ok {
-        anyhow::bail!("The name `{name}` cannot be used because it must be 1 to 60 letters, digits, `-`, `_` or `.`.");
+        anyhow::bail!("The name `{typed}` cannot be used because it contains no letter or digit.");
     }
     let path = worktree_path(repo_name, name);
     if let Some(base) = path.parent() {
@@ -822,6 +908,17 @@ pub fn create_worktree(repo_root: &str, repo_name: &str, name: &str) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::{unread, Watch};
+
+    #[test]
+    fn worktree_slug_keeps_what_was_typed_readable() {
+        use super::worktree_slug as slug;
+        assert_eq!(slug("Silencieux_2_décisions"), "Silencieux_2_decisions");
+        assert_eq!(slug("  refonte du parser !"), "refonte-du-parser");
+        assert_eq!(slug("--.cœur  été"), "coeur-ete");
+        assert_eq!(slug("éé/../x."), "ee-.-x");
+        assert_eq!(slug("!!!"), "");
+        assert_eq!(slug(&"a".repeat(80)).len(), 60);
+    }
     use serde_json::json;
 
     #[test]
@@ -857,9 +954,27 @@ mod tests {
     }
 
     #[test]
-    fn tail_keeps_the_end() {
-        assert_eq!(super::tail_chars("abc", 5), "abc");
-        assert_eq!(super::tail_chars("abcdéf", 3), "…déf");
+    fn answers_and_plan_mode_in_the_response() {
+        use super::permission_response as r;
+        let input = json!({"questions": [{"question": "Couleur ?"}]});
+        let ok = r(&input, true, Some(&json!({"Couleur ?": "Rouge"})), None, None).unwrap();
+        assert_eq!(ok["behavior"], "allow");
+        assert_eq!(ok["updatedInput"]["answers"]["Couleur ?"], "Rouge");
+        assert_eq!(ok["updatedInput"]["questions"], input["questions"]); // l'entrée d'origine est gardée
+        assert!(ok.get("updatedPermissions").is_none());
+        let plan = r(&json!({"plan": "# P"}), true, None, Some("acceptEdits"), None).unwrap();
+        assert_eq!(plan["updatedPermissions"][0], json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"}));
+        assert!(r(&json!({}), true, None, Some("bypassPermissions"), None).is_err()); // pas d'élévation par ce chemin
+        let no = r(&input, false, None, None, Some("Continue à planifier : ajoute des tests.")).unwrap();
+        assert_eq!(no, json!({"behavior": "deny", "message": "Continue à planifier : ajoute des tests."}));
+        assert_eq!(r(&input, false, None, None, None).unwrap()["message"], "Refusé depuis DRIFTy.");
+    }
+
+    #[test]
+    fn waiting_kinds() {
+        assert_eq!(super::waiting_kind("AskUserQuestion"), "question");
+        assert_eq!(super::waiting_kind("ExitPlanMode"), "plan");
+        assert_eq!(super::waiting_kind("Bash"), "permission");
     }
 
     #[test]

@@ -60,6 +60,7 @@ const take = (chats) => {
 // `store.busy` : sessions où Claude écrit ou réfléchit (tour en cours), y compris hors DRIFTy.
 store.bg = {};
 store.busy = new Set();
+store.waiting = new Set(); // sessions qui attendent ta réponse (question, plan), y compris hors DRIFTy
 let bgSig = "";
 const pollBg = async () => {
   if (document.hidden) return;
@@ -69,6 +70,7 @@ const pollBg = async () => {
   bgSig = s;
   store.bg = r.tasks || {};
   store.busy = new Set(r.busy || []);
+  store.waiting = new Set(r.waiting || []);
   notify();
 };
 pollBg();
