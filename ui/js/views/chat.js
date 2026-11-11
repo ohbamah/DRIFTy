@@ -1,6 +1,6 @@
 // Chat dans l'app : un processus `claude` piloté par le démon, suivi en direct.
 import { api, esc, usd, tok, turnEnd, icon, slotChip, toast, loader, imageStrip, diffStat, modelLabel, $, $$ } from "../lib.js";
-import { md } from "../md.js";
+import { md, stableLength } from "../md.js";
 import { attachImprove } from "../improve.js";
 import { attachSlash } from "../slash.js";
 import { openBtw, forkMessage } from "../btw.js";
@@ -10,7 +10,7 @@ import { replyActions, bindReplies } from "../reply.js";
 import { confirmBox } from "../confirm.js";
 import { mountAsk, askResolved } from "../ask.js";
 import { mountPlan, planChoices, planOutcome } from "../plan.js";
-import { bashRow, appendTail, asksPassword } from "../bashrow.js";
+import { bashRow, setupRow, appendTail, asksPassword } from "../bashrow.js";
 
 let source = null; // flux SSE du chat affiché (un seul à la fois)
 
@@ -698,7 +698,17 @@ export async function renderLive(box, chatId, onMeta) {
     liveTimer = 0;
     if (!live || document.hidden) return;
     const t0 = performance.now(), stick = nearBottom();
-    live.innerHTML = md(live._text);
+    // Les blocs déjà complets se rendent UNE fois (ajoutés au bout) ; seule la suite est refaite.
+    if (!live._done) {
+      live.innerHTML = `<div class="live-done"></div><div class="live-tail"></div>`;
+      [live._done, live._tail, live._doneLen] = [live.firstChild, live.lastChild, 0];
+    }
+    const k = stableLength(live._text);
+    if (k > live._doneLen) {
+      live._done.insertAdjacentHTML("beforeend", md(live._text.slice(live._doneLen, k)));
+      live._doneLen = k;
+    }
+    live._tail.innerHTML = md(live._text.slice(k));
     liveCost = performance.now() - t0;
     if (stick) scroller.scrollTop = scroller.scrollHeight;
   };
@@ -726,7 +736,7 @@ export async function renderLive(box, chatId, onMeta) {
     e.preventDefault();
     const inp = f.querySelector("input"), line = inp.value;
     inp.value = "";
-    api(`/api/chats/${chatId}/bash/${encodeURIComponent(f.closest("[data-bash]").dataset.bash)}/input`, { method: "POST", json: { text: line } }).catch((err) => toast(err.message, true));
+    api(`/api/chats/${chatId}/bash/${encodeURIComponent(f.closest("[data-bash]").dataset.bash)}/input`, { method: "POST", json: { text: line, secret: inp.type === "password" } }).catch((err) => toast(err.message, true));
     if (inp.type === "password") { inp.type = "text"; inp.placeholder = "Entrée pour la commande (Entrée pour envoyer)"; }
   });
   // « Arrêter » d'une commande `!` en cours.
@@ -779,6 +789,7 @@ export async function renderLive(box, chatId, onMeta) {
       else if (ev.kind === "bash") { const el = bashEl(ev.id); if (el) el.outerHTML = bashRow(ev); else add(bashRow(ev)); }
       else if (ev.kind === "status") setStatus(ev.status);
       else if (ev.kind === "notice") add(`<div class="event notice">${esc(ev.text)}</div>`);
+      else if (ev.kind === "setup") add(setupRow(ev));
       else if (ev.kind === "permission_resolved") {
         const card = thread.querySelector(`[data-perm="${CSS.escape(ev.request_id)}"]`);
         if (card?.classList.contains("plan")) { card.classList.add(ev.allow ? "ok" : "no"); card.removeAttribute("tabindex"); card.querySelector(".plan-actions").outerHTML = `<div class="plan-done">${esc(planOutcome(ev, planChoices(info.bypass)))}</div>`; }

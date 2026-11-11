@@ -1,60 +1,46 @@
-// Rendu Markdown minimal et sûr (tout est échappé avant mise en forme).
+// Rendu Markdown de l'interface, par markdown-it (ui/vendor/markdown-it, v14.1.0, MIT) :
+// listes numérotées et imbriquées, liens, citations, tableaux, code. Le HTML brut est
+// DÉSACTIVÉ (tout est échappé) ; les liens s'ouvrent dans le navigateur du système.
+// L'ancien rendu maison bouclait sans fin sur une ligne `|` et figeait l'app.
+import MarkdownIt from "../vendor/markdown-it/markdown-it.js";
 import { esc } from "./text.js";
 import { icon } from "./icons.js";
 
 // Bloc de code : boutons Copier (partout, voir main.js) et Transférer (dans une réponse, voir reply.js).
 const codeActions = `<div class="code-actions"><button type="button" data-code-copy title="Copier le code" aria-label="Copier le code">${icon("copy")}</button><button type="button" data-code-transfer title="Transférer le code vers une autre conversation" aria-label="Transférer le code">${icon("forward")}</button></div>`;
 
-function inline(s) {
-  return s
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>");
-}
+const mdi = new MarkdownIt({ html: false, linkify: true, breaks: true });
+const codeBlock = (code) => `<div class="code-block">${codeActions}<pre><code>${esc(code.replace(/\n$/, ""))}</code></pre></div>`;
+mdi.renderer.rules.fence = (tokens, i) => codeBlock(tokens[i].content);
+mdi.renderer.rules.code_block = (tokens, i) => codeBlock(tokens[i].content);
+// Titres ramenés aux deux tailles du fil (# et ## → h3, ### et plus → h4).
+const level = (tag) => (+tag.slice(1) <= 2 ? "h3" : "h4");
+mdi.renderer.rules.heading_open = (tokens, i) => `<${level(tokens[i].tag)}>`;
+mdi.renderer.rules.heading_close = (tokens, i) => `</${level(tokens[i].tag)}>\n`;
+// Liens : nouvel onglet, que l'app confie au navigateur du système.
+const linkOpen = mdi.renderer.rules.link_open || ((tokens, i, opts, env, self) => self.renderToken(tokens, i, opts));
+mdi.renderer.rules.link_open = (tokens, i, opts, env, self) => {
+  tokens[i].attrSet("target", "_blank");
+  tokens[i].attrSet("rel", "noopener noreferrer");
+  return linkOpen(tokens, i, opts, env, self);
+};
 
 export function md(src) {
-  const out = [];
-  const lines = String(src).split("\n");
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (line.startsWith("```")) {
-      const buf = [];
-      i++;
-      while (i < lines.length && !lines[i].startsWith("```")) buf.push(lines[i++]);
-      i++;
-      out.push(`<div class="code-block">${codeActions}<pre><code>${esc(buf.join("\n"))}</code></pre></div>`);
-      continue;
-    }
-    if (/^\s*\|.*\|\s*$/.test(line)) {
-      const rows = [];
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
-      const cells = (r) => r.trim().slice(1, -1).split("|").map((c) => inline(esc(c.trim())));
-      const body = rows.filter((r) => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
-      out.push(`<table>${body.map((r, k) => `<tr>${cells(r).map((c) => (k === 0 ? `<th>${c}</th>` : `<td>${c}</td>`)).join("")}</tr>`).join("")}</table>`);
-      continue;
-    }
-    if (/^\s*[-*] /.test(line)) {
-      const items = [];
-      while (i < lines.length && /^\s*[-*] /.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*] /, ""));
-      out.push(`<ul>${items.map((t) => `<li>${inline(esc(t))}</li>`).join("")}</ul>`);
-      continue;
-    }
-    const h = line.match(/^(#{1,4}) (.*)/);
-    if (h) {
-      out.push(`<h${h[1].length > 2 ? 4 : 3}>${inline(esc(h[2]))}</h${h[1].length > 2 ? 4 : 3}>`);
-      i++;
-      continue;
-    }
-    if (!line.trim()) {
-      i++;
-      continue;
-    }
-    // La 1re ligne est toujours prise : une ligne qu'aucun bloc ne reconnaît (`| a` sans `|`
-    // final, une ligne de tableau à moitié écrite) bouclait ici sans fin et figeait la page.
-    const para = [lines[i++]];
-    while (i < lines.length && lines[i].trim() && !/^(```|#{1,4} |\s*[-*] |\s*\|)/.test(lines[i])) para.push(lines[i++]);
-    out.push(`<p>${inline(esc(para.join("\n"))).replace(/\n/g, "<br>")}</p>`);
+  return mdi.render(String(src ?? ""));
+}
+
+/**
+ * Texte en cours d'écriture : longueur de sa partie déjà COMPLÈTE (blocs fermés par une ligne
+ * vide, hors bloc de code ouvert). Elle se rend une fois ; seule la suite est refaite à chaque
+ * fragment, au lieu de toute la réponse.
+ */
+export function stableLength(text) {
+  let fence = false, stable = 0, pos = 0;
+  for (const line of text.split("\n")) {
+    const end = pos + line.length + 1; // position après le saut de ligne
+    if (/^\s{0,3}(```|~~~)/.test(line)) fence = !fence;
+    else if (!fence && !line.trim() && end <= text.length) stable = end;
+    pos = end;
   }
-  return out.join("");
+  return stable;
 }

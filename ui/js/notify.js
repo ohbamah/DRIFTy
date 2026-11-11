@@ -118,6 +118,9 @@ function watchChats() {
       if (p.status === "working" && c.status !== "working" && !(c.id === viewing && !document.hidden)) {
         fire("done", "Agent terminé", c.name, c.repo_id, `#/conversations?c=${c.id}`);
       }
+      if (p.setup !== "failed" && c.setup === "failed") {
+        fire("permission", "La mise en place du worktree a échoué", c.name, c.repo_id, `#/conversations?c=${c.id}`);
+      }
       if ((c.pending || 0) > (p.pending || 0)) {
         // Question, plan et autorisation passent par le même canal ; le titre dit lequel.
         const title = { question: "Claude te pose une question", plan: "Claude attend la validation de son plan" }[c.waiting_for] || "Autorisation demandée";

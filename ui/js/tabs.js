@@ -208,6 +208,12 @@ async function makeBrowser(target, deliver, { url = "", openTab = null } = {}) {
 export function mountTabs(detail, tabsEl, key, target, deliver = {}) {
   const st = reg.get(key) || { tabs: [], active: null };
   reg.set(key, st);
+  // `detail` est réutilisé d'une conversation à l'autre : l'état « onglet ajouté affiché » de la
+  // précédente (classe `x-on`, qui masque le corps) ne doit pas passer à celle-ci. Sinon son fil
+  // restait invisible sous un « Conversation » pourtant actif. L'onglet actif propre à cette
+  // conversation est rétabli plus bas.
+  detail.classList.remove("x-on");
+  hidePanel();
   const host = document.createElement("div");
   host.className = "xtab-host";
   detail.append(host);
@@ -294,11 +300,14 @@ export function mountTabs(detail, tabsEl, key, target, deliver = {}) {
       const same = st.tabs.filter((t) => t.kind === tab.kind).length;
       if (tab.kind === "term" && same) tab.title = `Terminal ${same + 1}`;
       st.tabs.push(tab);
-      if (detail.isConnected) { button(tab); show(tab); }
+      // `detail` sert à toutes les conversations : c'est la barre d'onglets (propre à celle-ci)
+      // qui dit si on y est encore. Sinon l'onglet, créé après un changement de conversation,
+      // s'affichait par-dessus la suivante et masquait son fil.
+      if (tabsEl.isConnected) { button(tab); show(tab); }
     } catch (e) { toast(e.message, true); }
   }
 
   for (const tab of st.tabs) button(tab);
   const active = st.tabs.find((t) => t.id === st.active);
-  if (active) requestAnimationFrame(() => show(active));
+  if (active) requestAnimationFrame(() => { if (tabsEl.isConnected) show(active); });
 }

@@ -209,7 +209,7 @@ async function projectHtml(repo, sel) {
         <div class="sb-wt-row">${working ? STATUS.working : `<span class="st st-wt"></span>`}<span class="sb-wt-name">${esc(g.rel && g.worktree ? `${g.worktree}/${g.rel}` : name)}</span>${!g.worktree && !g.rel ? `<span class="sb-tag">primary</span>` : ""}
           ${g.worktree && !g.rel ? `<button class="sb-dots" type="button" data-wt-dots data-repo="${repo.id}" data-wt="${esc(g.worktree)}" data-n="${inGroup.length}" title="Archiver le worktree" aria-label="Actions du worktree">${icon("dots")}</button>` : ""}</div>
         ${branch ? `<div class="sb-branch">${esc(branch)}</div>` : ""}
-        ${rows || `<div class="sb-empty sb-wt-empty" title="Ses conversations apparaîtront après « Analyser »">Pas encore analysé</div>`}${more}
+        ${rows || (g.path ? `<button type="button" class="sb-wt-empty" data-sync data-sync-folder="${esc(g.path)}" title="Lire les conversations de ce worktree (lui seul)">Pas encore analysé · Analyser</button>` : "")}${more}
       </div>`;
     }).join("");
   }
@@ -304,6 +304,7 @@ export async function mountSidebar(el) {
     <nav class="sb-nav">
       <a href="#/" data-nav="usage">${icon("gauge")}Usage</a>
       <a href="#/ledger" data-nav="ledger">${icon("scale")}Bilan</a>
+      <a href="#/automations" data-nav="automations">${icon("flow")}Automations</a>
       <button type="button" data-sync class="sb-sync">${icon("sync")}Analyser</button>
     </nav>
     <div class="sb-section">Projets</div>

@@ -21,6 +21,15 @@ export function bashRow(ev, running = false) {
     + `${running ? `<form class="bash-in"><input type="text" autocomplete="off" spellcheck="false" placeholder="Entrée pour la commande (Entrée pour envoyer)"></form>` : ""}</div>`;
 }
 
+/** Fin du script de mise en place du worktree : son résultat et la fin de sa sortie. */
+export function setupRow(ev) {
+  const ok = ev.code === 0;
+  const meta = (ok ? "prêt" : `échec · code ${ev.code ?? "?"}`) + " · " + bashMeta({ ...ev, stopped: false, timed_out: false, code: 0 });
+  return `<div class="bash-run setup-run${ok ? "" : " failed"}">`
+    + `<div class="bash-cmd"><b>⚙</b><span>Mise en place du worktree</span><span class="bash-meta">${esc(meta)}</span></div>`
+    + `<pre class="out"${ev.output ? "" : " hidden"}>${esc(ev.output || "")}</pre></div>`;
+}
+
 /** La sortie demande-t-elle un mot de passe ? (le champ d'entrée se masque alors). */
 export function asksPassword(text) {
   return /(password|passphrase|mot de passe)[^\n]*:\s*$/i.test(text);

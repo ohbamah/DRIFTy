@@ -3,7 +3,7 @@
 
 use crate::raw::{self, Content, RawLine};
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
 
@@ -49,11 +49,38 @@ fn tool_label(input: Option<&serde_json::value::RawValue>) -> String {
     String::new()
 }
 
+/// Le transcript `{sid}.jsonl` dans les comptes configurés, même pas encore analysé :
+/// son chemin et le compte qui le détient.
+pub fn locate(conn: &Connection, sid: &str) -> Result<Option<(std::path::PathBuf, String)>> {
+    for a in crate::db::accounts(conn)? {
+        let Ok(projects) = std::fs::read_dir(std::path::Path::new(&a.config_dir).join("projects")) else { continue };
+        for p in projects.flatten() {
+            let f = p.path().join(format!("{sid}.jsonl"));
+            if f.is_file() {
+                return Ok(Some((f, a.slot)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Chemin du transcript : celui de la base, sinon celui trouvé dans les comptes (conversation
+/// pas encore analysée : reprise dans l'app, discussion rétablie après un redémarrage).
+fn path_of(conn: &Connection, sid: &str) -> Result<String> {
+    let known: Option<String> = conn
+        .query_row("SELECT file_path FROM sessions WHERE id = ?1", params![sid], |r| r.get(0))
+        .optional()?
+        .flatten();
+    if let Some(p) = known {
+        return Ok(p);
+    }
+    locate(conn, sid)?
+        .map(|(p, _)| p.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow::anyhow!("The conversation `{sid}` cannot be read because its transcript file is unknown."))
+}
+
 pub fn read(conn: &Connection, sid: &str) -> Result<Vec<Entry>> {
-    let path: Option<String> = conn.query_row("SELECT file_path FROM sessions WHERE id = ?1", params![sid], |r| r.get(0))?;
-    let Some(path) = path else {
-        anyhow::bail!("The conversation `{sid}` cannot be read because its transcript file is unknown.");
-    };
+    let path = path_of(conn, sid)?;
     let f = std::fs::File::open(&path).map_err(|e| anyhow::anyhow!("The transcript `{path}` cannot be read because {e}."))?;
     let mut out = Vec::new();
     for (li, line) in BufReader::new(f).lines().enumerate() {

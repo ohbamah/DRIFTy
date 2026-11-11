@@ -39,6 +39,8 @@ pub struct LaunchSpec {
     pub model: Option<String>,
     /// Reprise en BRANCHE (`--fork-session`) : une nouvelle conversation part de celle reprise.
     pub fork: bool,
+    /// Discussion rétablie après un redémarrage : elle garde son identifiant (voir persist.rs).
+    pub restore_id: Option<String>,
 }
 
 struct State {
@@ -68,6 +70,10 @@ struct State {
     /// Fin du dernier tour de Claude, et dernière consultation dans l'interface (ms).
     finished_at: i64,
     seen_at: i64,
+    /// Le processus s'est arrêté en plein tour (voir persist.rs).
+    interrupted: bool,
+    /// Script de mise en place du worktree : `running`, `ok` ou `failed` (aucun s'il n'y en a pas).
+    setup: Option<&'static str>,
 }
 
 /// Une discussion est « terminée et non lue » quand Claude a fini un tour
@@ -107,6 +113,9 @@ pub struct Chat {
     /// Conversation reprise (même session) : son historique précède le direct.
     pub resume_of: Option<String>,
     pub setup_job: Option<String>,
+    /// De quoi relancer la discussion après un redémarrage (voir persist.rs).
+    config_dir: Option<String>,
+    env: Vec<(String, String)>,
     /// Nom affiché, renommable.
     title: Mutex<String>,
     state: Mutex<State>,
@@ -170,7 +179,7 @@ impl Default for Hub {
 /// Commande `!` en cours : de quoi l'arrêter et lui écrire.
 struct BashRun {
     stop: tokio::sync::oneshot::Sender<()>,
-    input: tokio::sync::mpsc::Sender<String>,
+    input: tokio::sync::mpsc::Sender<crate::bang::Input>,
 }
 
 /// Délai d'une commande `!` (un bouton l'arrête avant).
@@ -277,8 +286,53 @@ impl Chat {
             // Ce qu'attend la discussion (la demande la plus récente) : question, plan ou autorisation.
             "waiting_for": st.pending.values().max_by_key(|r| r["_at"].as_i64().unwrap_or(0)).map(|r| waiting_kind(r["tool_name"].as_str().unwrap_or(""))), "cost_usd": st.cost_usd, "tokens_total": st.tokens, "model": st.model,
             "unread": unread(st.status, st.finished_at, st.seen_at),
+            "setup": st.setup,
             "queue": st.queue.iter().map(|(id, text, _)| json!({"id": id, "text": text})).collect::<Vec<_>>(),
         })
+    }
+
+    /// Description de relance (voir persist.rs) ; aucune tant que Claude n'a pas annoncé sa session.
+    pub fn saved(&self) -> Option<crate::persist::Saved> {
+        let st = self.state.lock().unwrap();
+        Some(crate::persist::Saved {
+            id: self.id.clone(),
+            repo_id: self.repo_id,
+            name: self.title.lock().unwrap().clone(),
+            cwd: self.cwd.clone(),
+            slot: self.slot.clone(),
+            config_dir: self.config_dir.clone(),
+            bypass: self.bypass,
+            worktree: self.worktree.clone(),
+            model: st.model.clone(),
+            session_id: st.session_id.clone()?,
+            env: self.env.clone(),
+            tokens: st.tokens,
+            cost_usd: st.cost_usd,
+            interrupted: st.status == "working" || st.interrupted,
+        })
+    }
+
+    /// Fin du script de mise en place : sa sortie (la fin) s'affiche dans la discussion. En cas
+    /// d'échec, le premier message (`first`) n'est PAS transmis : il attend dans la file, d'où
+    /// on l'envoie quand même ou on le reprend.
+    pub async fn setup_done(&self, code: Option<i32>, output: &str, ms: i64, first: Option<(String, Vec<Image>)>) {
+        let ok = code == Some(0);
+        self.state.lock().unwrap().setup = Some(if ok { "ok" } else { "failed" });
+        self.emit(json!({"type": "drifty", "kind": "setup", "code": code, "output": crate::bang::tail_chars(output.trim_end(), 6000), "ms": ms}));
+        let Some((text, images)) = first else { return };
+        if ok {
+            let _ = self.send(&text, images).await;
+            return;
+        }
+        let id = new_id();
+        self.state.lock().unwrap().queue.push((id.clone(), text.clone(), images.clone()));
+        self.emit(json!({"type": "drifty", "kind": "queued", "id": id, "text": text, "image_count": images.len()}));
+        self.notice("La mise en place du worktree a échoué : ton premier message n'est pas parti. Il attend ci-dessous : envoie-le quand même, ou reprends-le pour le modifier.");
+    }
+
+    /// Note de DRIFTy dans la discussion (affichée, jamais envoyée à Claude).
+    pub fn notice(&self, text: &str) {
+        self.emit(json!({"type": "drifty", "kind": "notice", "text": text}));
     }
 
     /// Abonnement : on s'abonne AVANT de copier l'historique ; le client dédoublonne par `seq`.
@@ -392,10 +446,10 @@ impl Chat {
 
     /// Une ligne tapée pour une commande `!` en cours (réponse, mot de passe) : écrite sur son
     /// entrée standard, jamais gardée ni diffusée.
-    pub async fn bash_input(&self, bid: &str, line: &str) -> Result<()> {
+    pub async fn bash_input(&self, bid: &str, line: &str, secret: bool) -> Result<()> {
         let tx = self.bash_runs.lock().unwrap().get(bid).map(|r| r.input.clone())
             .ok_or_else(|| anyhow::anyhow!("The input cannot reach the command `{bid}` because it is no longer running."))?;
-        tx.send(line.to_string()).await.map_err(|_| anyhow::anyhow!("The input cannot reach the command `{bid}` because it has ended."))
+        tx.send(crate::bang::Input { line: line.to_string(), secret }).await.map_err(|_| anyhow::anyhow!("The input cannot reach the command `{bid}` because it has ended."))
     }
 
     /// L'utilisateur a regardé la discussion : ce qui est fini est lu.
@@ -537,6 +591,13 @@ impl Chat {
 }
 
 impl Hub {
+    /// Descriptions de relance de toutes les discussions (voir persist.rs), dans l'ordre de création.
+    pub fn saved(&self) -> Vec<crate::persist::Saved> {
+        let mut v: Vec<(i64, crate::persist::Saved)> = self.chats.lock().unwrap().values().filter_map(|c| Some((c.created, c.saved()?))).collect();
+        v.sort_by_key(|(t, _)| *t);
+        v.into_iter().map(|(_, s)| s).collect()
+    }
+
     pub fn list(&self) -> Vec<Value> {
         let mut v: Vec<Value> = self.chats.lock().unwrap().values().map(|c| c.summary()).collect();
         v.sort_by_key(|c| -c["created"].as_i64().unwrap_or(0));
@@ -553,6 +614,14 @@ impl Hub {
         self.chats.lock().unwrap().remove(id);
         let _ = self.changed.send(());
         Ok(())
+    }
+
+    /// Arrête toutes les discussions (et leurs commandes `!`) sans les retirer de la liste.
+    pub async fn stop_all(&self) {
+        let all: Vec<Arc<Chat>> = self.chats.lock().unwrap().values().cloned().collect();
+        for c in all {
+            c.kill().await;
+        }
     }
 
     pub fn set_limits(&self, l: Limits) {
@@ -597,7 +666,7 @@ impl Hub {
 
         let (tx, _) = broadcast::channel(4096);
         let chat = Arc::new(Chat {
-            id: new_id(),
+            id: spec.restore_id.clone().unwrap_or_else(new_id),
             repo_id: spec.repo_id,
             cwd: spec.cwd,
             slot: spec.slot.clone(),
@@ -606,6 +675,8 @@ impl Hub {
             created: now_ms(),
             resume_of: spec.resume.clone(),
             setup_job: spec.setup_job.clone(),
+            config_dir: spec.config_dir.clone(),
+            env: spec.env.clone(),
             title: Mutex::new(spec.name.clone()),
             waiters: Mutex::new(HashMap::new()),
             bash_runs: Mutex::new(HashMap::new()),
@@ -625,6 +696,8 @@ impl Hub {
                 images: Vec::new(),
                 finished_at: 0,
                 seen_at: 0,
+                interrupted: false,
+                setup: spec.setup_job.as_ref().map(|_| "running"),
             }),
             tx,
             changed: self.changed.clone(),
@@ -748,6 +821,10 @@ impl Hub {
                     None => None,
                 };
                 chat.emit(json!({"type": "drifty", "kind": "exit", "code": code}));
+                {
+                    let mut st = chat.state.lock().unwrap();
+                    st.interrupted = st.status == "working";
+                }
                 chat.set_status("exited");
             });
         }

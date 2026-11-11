@@ -38,12 +38,21 @@ pub struct SyncReport {
 
 /// La synchronisation complète, en un seul point : transcripts → projets → bilan.
 pub fn sync(conn: &mut rusqlite::Connection) -> anyhow::Result<SyncReport> {
+    sync_in(conn, None)
+}
+
+/// La même synchronisation, limitée aux transcripts des dossiers `folders` (chemins) si donnés :
+/// « Analyser » un seul worktree sans relire tous les comptes.
+pub fn sync_in(conn: &mut rusqlite::Connection, folders: Option<&[String]>) -> anyhow::Result<SyncReport> {
     let start = std::time::Instant::now();
-    let ingest = ingest::run(conn)?;
+    let only: Option<Vec<String>> = folders.map(|f| f.iter().map(|p| ingest::project_dir_name(p)).collect());
+    let ingest = ingest::run_in(conn, only.as_deref())?;
     let new_folders = repos::sync(conn)?;
     let analysed_sessions = ledger::refresh(conn)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-    db::set_setting(conn, "last_sync_at", &now.to_string())?;
+    if folders.is_none() {
+        db::set_setting(conn, "last_sync_at", &now.to_string())?;
+    }
     Ok(SyncReport { ingest, new_folders, analysed_sessions, millis: start.elapsed().as_millis() })
 }
 

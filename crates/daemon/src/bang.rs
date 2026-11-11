@@ -6,6 +6,8 @@
 //! Entrée : ce que l'utilisateur tape (`input`) est écrit sur l'entrée standard de la commande,
 //! une ligne à la fois. `sudo` y lit son mot de passe (`-S`) au lieu d'exiger un terminal :
 //! une fonction shell `sudo` l'y redirige ; le mot de passe ne passe que par ce tuyau.
+//! Une saisie SECRÈTE (champ mot de passe) est en plus masquée dans la sortie : une commande
+//! qui réaffiche ce qu'elle lit (`read p; echo $p`) ne la montre ni à l'écran ni à Claude.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -26,6 +28,28 @@ pub struct Outcome {
     pub code: Option<i32>,
     pub stopped: bool,
     pub timed_out: bool,
+}
+
+/// Une ligne tapée pour la commande ; `secret` : venue du champ mot de passe.
+#[derive(Debug, Clone)]
+pub struct Input {
+    pub line: String,
+    pub secret: bool,
+}
+
+/// Ce qui remplace une saisie secrète dans la sortie.
+pub const MASK: &str = "••••••";
+
+/// `text` sans aucune des saisies secrètes (les très courtes, moins de 3 caractères, ne sont pas
+/// cherchées : elles effaceraient des lettres ordinaires de la sortie).
+pub fn mask(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for s in secrets.iter().filter(|s| s.chars().count() >= 3) {
+        if out.contains(s.as_str()) {
+            out = out.replace(s.as_str(), MASK);
+        }
+    }
+    out
 }
 
 /// Flux d'un morceau de sortie.
@@ -65,7 +89,7 @@ pub async fn run(
     cwd: &str,
     timeout: Duration,
     mut stop: oneshot::Receiver<()>,
-    mut input: mpsc::Receiver<String>,
+    mut input: mpsc::Receiver<Input>,
     mut on_chunk: impl FnMut(Stream, &str),
 ) -> Outcome {
     let mut out = Outcome::default();
@@ -90,6 +114,7 @@ pub async fn run(
     let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let mut sin = child.stdin.take();
     let mut input_open = true;
+    let mut secrets: Vec<String> = Vec::new();
     let (mut bo, mut be) = ([0u8; 4096], [0u8; 4096]);
     let (mut open_o, mut open_e) = (true, true);
     // Octets d'un caractère UTF-8 coupé entre deux lectures : gardés pour la suivante.
@@ -122,14 +147,17 @@ pub async fn run(
         tokio::select! {
             r = so.read(&mut bo), if open_o => match r {
                 Ok(0) | Err(_) => open_o = false,
-                Ok(n) => { let t = decode(&mut rest_o, &bo[..n]); if !t.is_empty() { on_chunk(Stream::Out, &t); push_tail(&mut out.stdout, &t); } }
+                Ok(n) => { let t = mask(&decode(&mut rest_o, &bo[..n]), &secrets); if !t.is_empty() { on_chunk(Stream::Out, &t); push_tail(&mut out.stdout, &t); } }
             },
             r = se.read(&mut be), if open_e => match r {
                 Ok(0) | Err(_) => open_e = false,
-                Ok(n) => { let t = decode(&mut rest_e, &be[..n]); if !t.is_empty() { on_chunk(Stream::Err, &t); push_tail(&mut out.stderr, &t); } }
+                Ok(n) => { let t = mask(&decode(&mut rest_e, &be[..n]), &secrets); if !t.is_empty() { on_chunk(Stream::Err, &t); push_tail(&mut out.stderr, &t); } }
             },
             line = input.recv(), if input_open => match (line, sin.as_mut()) {
-                (Some(l), Some(w)) => { if w.write_all(format!("{l}\n").as_bytes()).await.is_err() || w.flush().await.is_err() { sin = None; } }
+                (Some(i), Some(w)) => {
+                    if i.secret { secrets.push(i.line.clone()); }
+                    if w.write_all(format!("{}\n", i.line).as_bytes()).await.is_err() || w.flush().await.is_err() { sin = None; }
+                }
                 (None, _) => input_open = false,
                 _ => {}
             },
@@ -142,8 +170,9 @@ pub async fn run(
     } else {
         let _ = child.wait().await;
     }
-    out.stdout = tail_chars(out.stdout.trim_end(), MAX_CHARS);
-    out.stderr = tail_chars(out.stderr.trim_end(), MAX_CHARS);
+    // Masquage final sur la sortie entière : rattrape une saisie coupée entre deux lectures.
+    out.stdout = tail_chars(mask(&out.stdout, &secrets).trim_end(), MAX_CHARS);
+    out.stderr = tail_chars(mask(&out.stderr, &secrets).trim_end(), MAX_CHARS);
     out
 }
 
@@ -219,7 +248,7 @@ mod tests {
         let (itx, irx) = mpsc::channel(4);
         let feed = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            itx.send("secret".into()).await.unwrap();
+            itx.send(Input { line: "secret".into(), secret: false }).await.unwrap();
             itx // gardé ouvert : la commande attend vraiment sa ligne
         });
         let o = run("/bin/sh", "printf 'Password:' >&2; read p; echo \"lu=$p\"", "/", Duration::from_secs(10), rx, irx, |_, _| {}).await;
@@ -239,13 +268,35 @@ mod tests {
         let feed = tokio::spawn(async move {
             for _ in 0..3 {
                 tokio::time::sleep(Duration::from_millis(300)).await;
-                let _ = itx.send("pas-le-bon".into()).await;
+                let _ = itx.send(Input { line: "pas-le-bon".into(), secret: true }).await;
             }
         });
         let o = run("/bin/sh", "sudo -k; sudo true", "/", Duration::from_secs(20), rx, irx, |_, _| {}).await;
         let _ = feed.await;
         assert!(!o.stderr.contains("terminal is required"), "{}", o.stderr);
         assert!(o.stderr.to_lowercase().contains("password"), "{}", o.stderr);
+    }
+
+    #[tokio::test]
+    async fn a_secret_echoed_by_the_command_is_masked() {
+        // Le script réaffiche ce qu'il lit, en deux temps (coupé entre deux lectures) et sur
+        // les deux flux : ni l'écran (morceaux) ni Claude (contexte) ne voient le mot de passe.
+        let (_tx, rx) = oneshot::channel();
+        let (itx, irx) = mpsc::channel(4);
+        let feed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            itx.send(Input { line: "Tr0ub4dor".into(), secret: true }).await.unwrap();
+            itx
+        });
+        let mut shown = String::new();
+        let o = run("/bin/sh", "printf 'Password:' >&2; read p; echo \"lu=$p\"; echo \"$p\" >&2", "/", Duration::from_secs(10), rx, irx, |_, t| shown.push_str(t)).await;
+        let _ = feed.await;
+        assert_eq!(o.stdout, format!("lu={MASK}"));
+        assert_eq!(o.stderr, format!("Password:{MASK}"));
+        assert!(!shown.contains("Tr0ub4dor") && !context_block("x", &o, Duration::from_secs(1)).contains("Tr0ub4dor"));
+        // Une saisie ordinaire, elle, reste visible.
+        assert_eq!(mask("oui", &["abc".into()]), "oui");
+        assert_eq!(mask("y", &["y".into()]), "y");
     }
 
     #[tokio::test]

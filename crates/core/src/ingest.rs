@@ -70,7 +70,27 @@ fn read_from(path: &Path, from: u64) -> Result<(FileBatch, u64)> {
     Ok((batch, offset))
 }
 
+/// Nom du dossier de transcripts que Claude Code donne au dossier de travail `path` :
+/// tout signe autre qu'une lettre ou un chiffre ASCII devient `-`
+/// (`/Users/x/drifty/worktrees/archc/S-2` → `-Users-x-drifty-worktrees-archc-S-2`).
+pub fn project_dir_name(path: &str) -> String {
+    path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// Le dossier de transcripts `dir` est-il celui d'un des dossiers `only`, ou d'un de leurs
+/// sous-dossiers (une session lancée plus bas dans le worktree) ?
+fn in_scope(dir: &str, only: &[String]) -> bool {
+    only.iter().any(|o| dir == o || dir.strip_prefix(o.as_str()).is_some_and(|r| r.starts_with('-')))
+}
+
+/// Toute l'ingestion (bouton « Analyser »).
 pub fn run(conn: &mut Connection) -> Result<Report> {
+    run_in(conn, None)
+}
+
+/// Ingestion limitée aux transcripts des dossiers de travail `only` (noms de `project_dir_name`),
+/// ou complète si `None`. Même chemin dans les deux cas : seul le choix des fichiers change.
+pub fn run_in(conn: &mut Connection, only: Option<&[String]>) -> Result<Report> {
     let start = Instant::now();
     let accounts = db::accounts(conn)?;
     let known = db::file_states(conn)?;
@@ -99,6 +119,9 @@ pub fn run(conn: &mut Connection) -> Result<Report> {
                 .and_then(|r| r.components().next())
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 .unwrap_or_default();
+            if only.is_some_and(|o| !in_scope(&project_dir, o)) {
+                continue;
+            }
             cands.push(Candidate { path: p, slot: acc.slot.clone(), project_dir, size, mtime, from });
         }
     }
@@ -130,4 +153,19 @@ pub fn run(conn: &mut Connection) -> Result<Report> {
     db::write(conn, &files)?;
     rep.millis = start.elapsed().as_millis();
     Ok(rep)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    #[test]
+    fn a_worktree_and_its_subfolders_are_in_scope() {
+        let wt = super::project_dir_name("/Users/x/drifty/worktrees/archc/Silencieux-2-decisions");
+        assert_eq!(wt, "-Users-x-drifty-worktrees-archc-Silencieux-2-decisions");
+        let only = [wt.clone()];
+        assert!(super::in_scope(&wt, &only));
+        assert!(super::in_scope(&format!("{wt}-tests"), &only)); // sous-dossier `tests`
+        assert!(!super::in_scope("-Users-x-drifty-worktrees-archc-Silencieux-2", &only));
+        assert!(!super::in_scope("-Users-x-dev-archc", &only));
+        assert_eq!(super::project_dir_name("/a/b_c.d é"), "-a-b-c-d--");
+    }
 }

@@ -3,6 +3,7 @@ import { api, esc, icon, hideTip, toast, loader, lightbox, copyText, $, $$ } fro
 import * as usage from "./views/usage.js";
 import * as conversations from "./views/conversations.js";
 import * as ledger from "./views/ledger.js";
+import * as automations from "./views/automations.js";
 import * as accounts from "./views/accounts.js";
 import { slide } from "./slide.js";
 import { mountSidebar } from "./sidebar.js";
@@ -10,6 +11,7 @@ import { reload } from "./store.js";
 import { startNotifications } from "./notify.js";
 import { autoSelects } from "./select.js";
 import { startKeys } from "./keys.js";
+import { startWatchdog } from "./watchdog.js";
 
 const view = $("#view");
 $("#sb-reopen").innerHTML = icon("sidebar");
@@ -28,6 +30,7 @@ async function route() {
   try {
     if (name === "conversations") await conversations.show(view, params);
     else if (name === "ledger") await ledger.show(view);
+    else if (name === "automations") await automations.show(view);
     else if (name === "accounts") await accounts.show(view);
     else await usage.show(view);
     slide(view);
@@ -55,7 +58,9 @@ document.addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-sync]");
   if (!btn) return;
   try {
-    await api("/api/sync", { method: "POST" });
+    // « Analyser » un seul dossier (worktree pas encore lu), ou tout.
+    const folder = btn.dataset.syncFolder;
+    await api(folder ? "/api/sync/folder" : "/api/sync", { method: "POST", ...(folder ? { json: { path: folder } } : {}) });
     setBusy(true);
     for (let i = 0; i < 240; i++) {
       await new Promise((r) => setTimeout(r, 500));
@@ -77,6 +82,7 @@ mountSidebar($("#sidebar")).then(route);
 startNotifications();
 autoSelects(document.body); // menus déroulants maison partout
 startKeys();
+startWatchdog();
 
 // Usage des comptes : relevé par `claude -p /usage` (sans session), toutes les 2 min tant que
 // l'app est visible ; le serveur ne relance pas un compte plus d'une fois par minute.

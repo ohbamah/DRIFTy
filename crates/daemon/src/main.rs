@@ -2,7 +2,10 @@
 //! L'interface ne connaît que ce protocole HTTP/JSON : le démon peut être
 //! réécrit dans un autre langage sans la toucher.
 
+mod automations;
 mod bang;
+mod client;
+mod persist;
 mod bg;
 mod chat;
 mod claude_update;
@@ -59,6 +62,8 @@ struct App {
     origins: Arc<Vec<String>>,
     terms: term::Terms,
     web: web::Proxies,
+    /// Pages ouvertes : leurs signes de vie (voir client.rs).
+    pages: client::Pages,
 }
 
 struct ApiError(anyhow::Error);
@@ -95,13 +100,13 @@ where
 }
 
 /// Lance une synchronisation si aucune n'est en cours. Rend `false` sinon.
-fn trigger_sync(app: &App) -> bool {
+fn trigger_sync(app: &App, folders: Option<Vec<String>>) -> bool {
     if app.syncing.swap(true, Ordering::SeqCst) {
         return false;
     }
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
-        match db::open(&drifty_core::db_path()).and_then(|mut c| drifty_core::sync(&mut c)) {
+        match db::open(&drifty_core::db_path()).and_then(|mut c| drifty_core::sync_in(&mut c, folders.as_deref())) {
             Ok(r) => {
                 if r.ingest.files_read > 0 {
                     eprintln!(
@@ -178,6 +183,9 @@ fn serve(path: &str) -> Response {
     };
     let mut res = Response::new(Body::from(f.contents()));
     res.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    // L'interface est embarquée dans le binaire : après une mise à jour, la page doit relire
+    // chaque fichier (sinon un module gardé en cache côtoie les nouveaux, mesuré dans Chrome).
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     res
 }
 
@@ -224,7 +232,20 @@ async fn status(State(app): State<App>) -> ApiResult {
 }
 
 async fn sync_now(State(app): State<App>) -> Json<Value> {
-    Json(json!({"started": trigger_sync(&app)}))
+    Json(json!({"started": trigger_sync(&app, None)}))
+}
+
+#[derive(Deserialize)]
+struct SyncFolder {
+    path: String,
+}
+
+/// « Analyser » un seul dossier (un worktree dont les conversations ne sont pas encore lues).
+async fn sync_folder(State(app): State<App>, Json(f): Json<SyncFolder>) -> ApiResult {
+    if !std::path::Path::new(&f.path).is_absolute() {
+        return Err(anyhow::anyhow!("The folder `{}` cannot be analysed because its path is not absolute.", f.path).into());
+    }
+    Ok(Json(json!({"started": trigger_sync(&app, Some(vec![f.path]))})))
 }
 
 async fn overview(State(app): State<App>, Query(q): Query<OverviewQ>) -> ApiResult {
@@ -340,18 +361,13 @@ struct ChatDecision {
 /// Compte qui détient le transcript `sid` et dossier de la conversation (premier `cwd` lu).
 fn transcript_origin(c: &Connection, sid: &str) -> Result<Option<(Option<String>, String)>> {
     use std::io::BufRead;
-    for a in drifty_core::db::accounts(c)? {
-        let Ok(projects) = std::fs::read_dir(std::path::Path::new(&a.config_dir).join("projects")) else { continue };
-        for p in projects.flatten() {
-            let f = p.path().join(format!("{sid}.jsonl"));
-            let Ok(file) = std::fs::File::open(&f) else { continue };
-            let cwd = std::io::BufReader::new(file).lines().take(200).map_while(Result::ok).find_map(|l| {
-                serde_json::from_str::<Value>(&l).ok().and_then(|v| v["cwd"].as_str().map(str::to_string))
-            });
-            return Ok(Some((cwd, a.slot)));
-        }
-    }
-    Ok(None)
+    let Some((f, slot)) = transcript::locate(c, sid)? else { return Ok(None) };
+    let cwd = std::fs::File::open(&f).ok().and_then(|file| {
+        std::io::BufReader::new(file).lines().take(200).map_while(Result::ok).find_map(|l| {
+            serde_json::from_str::<Value>(&l).ok().and_then(|v| v["cwd"].as_str().map(str::to_string))
+        })
+    });
+    Ok(Some((cwd, slot)))
 }
 
 fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
@@ -413,6 +429,7 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
             setup_job: None,
             fork: r.fork,
             model: r.model.clone().filter(|m| !m.trim().is_empty()),
+            restore_id: None,
         });
     }
     let repo_id = r.repo_id.ok_or_else(|| anyhow::anyhow!("The chat cannot start because it names neither a project nor a conversation."))?;
@@ -480,6 +497,7 @@ fn chat_spec(c: &Connection, r: &NewChat) -> Result<chat::LaunchSpec> {
         setup_job: None,
         fork: false,
         model: r.model.clone().filter(|m| !m.trim().is_empty()),
+        restore_id: None,
     })
 }
 
@@ -847,11 +865,14 @@ async fn chat_start(State(app): State<App>, Json(r): Json<NewChat>) -> ApiResult
     // Le premier message attend la fin de la mise en place (dépendances, .env…).
     let job = spec.setup_job.clone();
     let chat = app.chats.start(spec, if job.is_some() { None } else { first.clone() }).await?;
-    if let (Some(job), Some((text, images))) = (job, first) {
+    // Fin de la mise en place : sa sortie dans la discussion ; le premier message part s'il a réussi.
+    if let Some(job) = job {
         let (jobs, chat) = (app.jobs.clone(), chat.clone());
+        let started = std::time::Instant::now();
         tokio::spawn(async move {
-            jobs.wait(&job).await;
-            let _ = chat.send(&text, images).await;
+            let code = jobs.wait(&job).await;
+            let output = jobs.read(&job, 0).ok().and_then(|v| v["output"].as_str().map(str::to_string)).unwrap_or_default();
+            chat.setup_done(code, &output, started.elapsed().as_millis() as i64, first).await;
         });
     }
     Ok(Json(chat.summary()))
@@ -862,8 +883,17 @@ async fn chat_bash(State(app): State<App>, Path(id): Path<String>, Json(t): Json
     Ok(Json(json!({"id": bid})))
 }
 
-async fn chat_bash_input(State(app): State<App>, Path((id, bid)): Path<(String, String)>, Json(t): Json<ChatText>) -> ApiResult {
-    app.chats.get(&id)?.bash_input(&bid, &t.text).await?;
+#[derive(Deserialize)]
+struct BashInput {
+    #[serde(default)]
+    text: String,
+    /// Tapée dans le champ mot de passe : masquée dans la sortie de la commande.
+    #[serde(default)]
+    secret: bool,
+}
+
+async fn chat_bash_input(State(app): State<App>, Path((id, bid)): Path<(String, String)>, Json(t): Json<BashInput>) -> ApiResult {
+    app.chats.get(&id)?.bash_input(&bid, &t.text, t.secret).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1304,7 +1334,17 @@ async fn main() -> Result<()> {
         }),
         terms: term::Terms::default(),
         web: web::Proxies::default(),
+        pages: client::Pages::default(),
     };
+    app.pages.watch();
+
+    // Discussions d'avant le redémarrage : relancées (en reprise, sans rien envoyer), puis suivies.
+    let restored = persist::restore(&app.chats).await;
+    if restored > 0 {
+        eprintln!("{restored} discussion(s) rétablie(s)");
+    }
+    persist::keep(app.chats.clone());
+    persist::on_shutdown(app.chats.clone());
 
     // Messages programmés : envoyés à l'heure par le démon.
     schedule::spawn(app.read.clone(), app.chats.clone(), resume_spec);
@@ -1317,6 +1357,11 @@ async fn main() -> Result<()> {
         .route("/ui/{*path}", get(static_file))
         .route("/api/status", get(status))
         .route("/api/sync", post(sync_now))
+        .route("/api/sync/folder", post(sync_folder))
+        .route("/api/client/beat", post(client::beat))
+        .route("/api/automations", get(automations::route_list))
+        .route("/api/automations/{id}", put(automations::route_put).delete(automations::route_delete))
+        .route("/api/client/log", post(client::log))
         .route("/api/overview", get(overview))
         .route("/api/ledger", get(ledger))
         .route("/api/usage", get(usage))

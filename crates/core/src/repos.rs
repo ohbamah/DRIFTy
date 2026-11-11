@@ -171,17 +171,20 @@ struct Group {
     rel: String,
     sessions: i64,
     last_ts: Option<i64>,
+    /// Dossier d'un worktree créé par l'app sans conversation analysée (« Analyser » ce dossier).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 /// Worktrees créés par DRIFTy (`~/drifty/worktrees/…`, ou l'ancien `~/claudius/worktrees/…`)
 /// encore présents dans `git worktree list --porcelain` : leurs noms.
-fn app_worktrees(porcelain: &str, home: &Path) -> Vec<String> {
+fn app_worktrees(porcelain: &str, home: &Path) -> Vec<(String, String)> {
     let bases = [home.join("drifty").join("worktrees"), home.join("claudius").join("worktrees")];
     porcelain
         .lines()
         .filter_map(|l| l.strip_prefix("worktree "))
         .filter(|p| bases.iter().any(|b| Path::new(p).starts_with(b)))
-        .map(basename)
+        .map(|p| (basename(p), p.to_string()))
         .collect()
 }
 
@@ -228,17 +231,17 @@ pub fn list(conn: &Connection) -> Result<Value> {
             v["slot"] = json!(default);
         }
         let mut groups: Vec<Group> = gst
-            .query_map(params![id], |r| Ok(Group { worktree: r.get(0)?, rel: r.get(1)?, sessions: r.get(2)?, last_ts: r.get(3)? }))?
+            .query_map(params![id], |r| Ok(Group { worktree: r.get(0)?, rel: r.get(1)?, sessions: r.get(2)?, last_ts: r.get(3)?, path: None }))?
             .collect::<Result<_, _>>()?;
         // Un worktree créé par l'app existe avant que ses conversations soient analysées (et
         // une discussion en direct ne survit pas au redémarrage) : il reste visible et choisissable.
         if !v["key"].as_str().unwrap_or("").starts_with("dir:") {
             let root = v["root"].as_str().unwrap_or("").to_string();
             let porcelain = git(Path::new(&root), &["worktree", "list", "--porcelain"]).unwrap_or_default().join("\n");
-            for name in app_worktrees(&porcelain, &crate::home()) {
+            for (name, path) in app_worktrees(&porcelain, &crate::home()) {
                 let archived: bool = arch.query_row(params![id, name], |_| Ok(())).optional()?.is_some();
                 if !archived && !groups.iter().any(|g| g.worktree == name) {
-                    groups.push(Group { worktree: name, rel: String::new(), sessions: 0, last_ts: None });
+                    groups.push(Group { worktree: name, rel: String::new(), sessions: 0, last_ts: None, path: Some(path) });
                 }
             }
         }
@@ -337,6 +340,7 @@ mod tests {
     #[test]
     fn app_worktrees_are_listed() {
         let p = "worktree /r/archc\nHEAD aa\nbranch refs/heads/main\n\nworktree /h/drifty/worktrees/archc/Silencieux-2-decisions\nHEAD bb\n\nworktree /h/claudius/worktrees/archc/old\n\nworktree /h/conductor/workspaces/archc/x\n";
-        assert_eq!(super::app_worktrees(p, std::path::Path::new("/h")), ["Silencieux-2-decisions", "old"]);
+        let names: Vec<String> = super::app_worktrees(p, std::path::Path::new("/h")).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["Silencieux-2-decisions", "old"]);
     }
 }
